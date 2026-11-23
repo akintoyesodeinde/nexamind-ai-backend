@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\DocumentController;
 use App\Http\Controllers\Api\V1\HealthController;
+use App\Http\Controllers\Api\V1\KnowledgeBaseController;
+use App\Http\Controllers\Api\V1\RetrievalController;
 use App\Http\Controllers\Api\V1\TenantController;
 use App\Http\Controllers\Api\V1\TenantMemberController;
 use Illuminate\Support\Facades\Route;
@@ -43,6 +46,33 @@ Route::prefix('v1')->group(function (): void {
                 ->middleware('permission:users.manage');
             Route::delete('/tenants/current/members/{membershipId}', [TenantMemberController::class, 'destroy'])
                 ->middleware('permission:users.manage');
+
+            // Phase 2: Knowledge Bases & ACLs
+            Route::get('/knowledge-bases', [KnowledgeBaseController::class, 'index']);
+            Route::post('/knowledge-bases', [KnowledgeBaseController::class, 'store'])
+                ->middleware('permission:knowledge.create');
+            Route::get('/knowledge-bases/{id}', [KnowledgeBaseController::class, 'show']);
+            Route::patch('/knowledge-bases/{id}', [KnowledgeBaseController::class, 'update'])
+                ->middleware('permission:knowledge.create');
+            Route::get('/knowledge-bases/{id}/permissions', [KnowledgeBaseController::class, 'permissions']);
+            Route::put('/knowledge-bases/{id}/permissions', [KnowledgeBaseController::class, 'syncPermissions']);
+
+            // Phase 2: Documents, Versioning, Signed Downloads & ACLs
+            Route::get('/documents', [DocumentController::class, 'index']);
+            Route::post('/documents', [DocumentController::class, 'store'])
+                ->middleware('permission:documents.upload');
+            Route::get('/documents/{id}', [DocumentController::class, 'show']);
+            Route::get('/documents/{id}/status', [DocumentController::class, 'status']);
+            Route::get('/documents/{id}/versions', [DocumentController::class, 'versions']);
+            Route::get('/documents/{id}/chunks', [DocumentController::class, 'chunks']);
+            Route::get('/documents/{id}/download-url', [DocumentController::class, 'downloadUrl']);
+            Route::get('/documents/{id}/permissions', [DocumentController::class, 'permissions']);
+            Route::put('/documents/{id}/permissions', [DocumentController::class, 'syncPermissions']);
+            Route::delete('/documents/{id}', [DocumentController::class, 'destroy']);
+
+            // Phase 2: Pre-Retrieval ACL-Enforced Vector Search
+            Route::post('/retrieval/search', [RetrievalController::class, 'search'])
+                ->middleware('permission:chat.ask');
 
             Route::get('/audit-logs', [AuditLogController::class, 'index'])
                 ->middleware('permission:audit.view');

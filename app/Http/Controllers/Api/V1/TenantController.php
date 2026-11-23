@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\V1;
 
 use App\Domain\Audit\Models\AuditLog;
+use App\Domain\Documents\Models\Document;
 use App\Domain\Identity\Models\Role;
 use App\Domain\Identity\Models\User;
+use App\Domain\Knowledge\Models\KnowledgeBase;
 use App\Domain\Tenancy\Contracts\TenantContextInterface;
 use App\Domain\Tenancy\Models\TenantMembership;
 use App\Domain\Tenancy\Models\TenantSetting;
@@ -65,6 +67,16 @@ final class TenantController extends Controller
             ->where('created_at', '>=', now('UTC')->subDay())
             ->count();
 
+        $kbCount = KnowledgeBase::query()
+            ->where('tenant_id', $tenant->id)
+            ->where('status', 'active')
+            ->count();
+
+        $documentsCount = Document::query()
+            ->where('tenant_id', $tenant->id)
+            ->where('status', '!=', 'deleted')
+            ->count();
+
         return ApiResponse::success([
             'tenant' => $tenant->toApiArray(),
             'settings' => $settings->toApiArray(),
@@ -73,8 +85,8 @@ final class TenantController extends Controller
             'stats' => [
                 'members_count' => $membersCount,
                 'audit_events_last_24h' => $auditLast24h,
-                'knowledge_bases_count' => 0,
-                'documents_count' => 0,
+                'knowledge_bases_count' => $kbCount,
+                'documents_count' => $documentsCount,
                 'pending_approvals_count' => 0,
             ],
         ], 200, $request);

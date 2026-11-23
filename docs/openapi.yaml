@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: NexaMind AI REST API
-  version: 1.0.0-phase1
+  version: 1.0.0-phase2
   description: >
     Enterprise Generative AI Knowledge & Workflow Automation Platform API.
     All tenant-scoped endpoints require an authenticated Sanctum session or bearer token
@@ -13,6 +13,9 @@ tags:
   - name: Health
   - name: Auth
   - name: Tenancy
+  - name: Knowledge
+  - name: Documents
+  - name: Retrieval
   - name: Audit
 components:
   securitySchemes:
@@ -202,6 +205,143 @@ paths:
       responses:
         '200':
           description: Roles list
+  /knowledge-bases:
+    get:
+      tags: [Knowledge]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List knowledge bases the authenticated user is permitted to read
+      responses:
+        '200': { description: Permitted knowledge bases }
+    post:
+      tags: [Knowledge]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Create a new knowledge base (Owner/Admin/Manager)
+      responses:
+        '201': { description: Knowledge base created }
+  /knowledge-bases/{id}/permissions:
+    get:
+      tags: [Knowledge]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: List knowledge base ACL grants
+      responses:
+        '200': { description: Knowledge base ACL entries }
+    put:
+      tags: [Knowledge]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Replace knowledge base ACL grants
+      responses:
+        '200': { description: Updated ACL entries }
+  /documents:
+    get:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List ACL-authorized documents in the current tenant
+      responses:
+        '200': { description: Authorized documents }
+    post:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Upload a validated document (or new version) into private Azure Blob Storage and enqueue ingestion
+      responses:
+        '201': { description: Document uploaded and queued/ingested }
+        '422': { description: Validation or security check failed }
+  /documents/{id}:
+    get:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Retrieve authorized document details
+      responses:
+        '200': { description: Document details }
+    delete:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Delete document, chunks, and blobs
+      responses:
+        '204': { description: Deleted }
+  /documents/{id}/status:
+    get:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Poll asynchronous ingestion status
+      responses:
+        '200': { description: Ingestion status }
+  /documents/{id}/versions:
+    get:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: List document version history
+      responses:
+        '200': { description: Version history }
+  /documents/{id}/chunks:
+    get:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Inspect extracted semantic chunks with page and heading references
+      responses:
+        '200': { description: Document chunks }
+  /documents/{id}/download-url:
+    get:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Issue short-lived Azure Blob Service SAS download URL
+      responses:
+        '200': { description: Temporary signed download URL }
+  /documents/{id}/permissions:
+    get:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Get document access policy and ACL grants
+      responses:
+        '200': { description: Document ACL configuration }
+    put:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Update document access policy (`inherit` or `restricted`) and ACL grants
+      responses:
+        '200': { description: Updated document ACLs }
+  /retrieval/search:
+    post:
+      tags: [Retrieval]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Pre-retrieval ACL-enforced SQL Server 2025 / Azure SQL vector similarity search
+      responses:
+        '200': { description: Ranked authorized document chunks }
+        '403': { description: Unauthorized or cross-tenant knowledge base requested }
   /audit-logs:
     get:
       tags: [Audit]
