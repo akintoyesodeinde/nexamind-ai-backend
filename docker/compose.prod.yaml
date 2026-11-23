@@ -52,7 +52,7 @@ services:
       - nexamind_internal
 
   proxy:
-    image: nginx:1.31.10-alpine
+    image: nginx:1.30.7-alpine
     container_name: nexamind-proxy
     restart: unless-stopped
     depends_on:
