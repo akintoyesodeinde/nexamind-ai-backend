@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Domain\Agents\Exceptions\ToolSecurityException;
 use App\Domain\AI\Exceptions\QuotaExceededException;
 use App\Http\Middleware\IdempotencyMiddleware;
 use App\Http\Middleware\RequestIdMiddleware;
@@ -90,6 +91,14 @@ return Application::configure(basePath: dirname(__DIR__))
             }
 
             return ApiResponse::error('QUOTA_EXCEEDED', $e->getMessage(), 429, $e->quotaDetails, $request);
+        });
+
+        $exceptions->render(function (ToolSecurityException $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return ApiResponse::error($e->errorCode, $e->getMessage(), $e->httpStatus, $e->details, $request);
         });
 
         $exceptions->render(function (ThrottleRequestsException $e, Request $request) {

@@ -13,6 +13,7 @@ use App\Domain\Tenancy\Contracts\TenantContextInterface;
 use App\Domain\Tenancy\Models\TenantMembership;
 use App\Domain\Tenancy\Models\TenantSetting;
 use App\Domain\Tenancy\Services\TenantService;
+use App\Domain\Workflows\Models\ApprovalRequest;
 use App\Http\Controllers\Controller;
 use App\Support\Http\ApiResponse;
 use Illuminate\Http\JsonResponse;
@@ -77,6 +78,11 @@ final class TenantController extends Controller
             ->where('status', '!=', 'deleted')
             ->count();
 
+        $pendingApprovalsCount = ApprovalRequest::query()
+            ->where('tenant_id', $tenant->id)
+            ->where('status', 'pending')
+            ->count();
+
         return ApiResponse::success([
             'tenant' => $tenant->toApiArray(),
             'settings' => $settings->toApiArray(),
@@ -87,7 +93,7 @@ final class TenantController extends Controller
                 'audit_events_last_24h' => $auditLast24h,
                 'knowledge_bases_count' => $kbCount,
                 'documents_count' => $documentsCount,
-                'pending_approvals_count' => 0,
+                'pending_approvals_count' => $pendingApprovalsCount,
             ],
         ], 200, $request);
     }

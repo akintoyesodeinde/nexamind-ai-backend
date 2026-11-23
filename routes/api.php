@@ -2,17 +2,22 @@
 
 declare(strict_types=1);
 
+use App\Http\Controllers\Api\V1\AgentController;
 use App\Http\Controllers\Api\V1\AiModelController;
+use App\Http\Controllers\Api\V1\AnalyticsController;
+use App\Http\Controllers\Api\V1\ApprovalController;
 use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\ConversationController;
 use App\Http\Controllers\Api\V1\DocumentController;
 use App\Http\Controllers\Api\V1\DocumentIntelligenceController;
+use App\Http\Controllers\Api\V1\EvaluationController;
 use App\Http\Controllers\Api\V1\HealthController;
 use App\Http\Controllers\Api\V1\KnowledgeBaseController;
 use App\Http\Controllers\Api\V1\RetrievalController;
 use App\Http\Controllers\Api\V1\TenantController;
 use App\Http\Controllers\Api\V1\TenantMemberController;
+use App\Http\Controllers\Api\V1\WorkflowController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function (): void {
@@ -100,7 +105,66 @@ Route::prefix('v1')->group(function (): void {
             Route::post('/messages/{messageId}/feedback', [ConversationController::class, 'feedback'])
                 ->middleware('permission:chat.ask');
 
+            // Phase 4: Controlled Enterprise AI Agents & Tool Registry
+            Route::get('/agents/tools', [AgentController::class, 'toolsCatalog']);
+            Route::get('/agents', [AgentController::class, 'index']);
+            Route::post('/agents', [AgentController::class, 'store'])
+                ->middleware('permission:agents.manage');
+            Route::get('/agents/runs', [AgentController::class, 'listRuns']);
+            Route::get('/agents/runs/{runId}', [AgentController::class, 'showRun']);
+            Route::post('/agents/runs/{runId}/cancel', [AgentController::class, 'cancelRun'])
+                ->middleware('permission:agents.manage');
+            Route::get('/agents/{id}', [AgentController::class, 'show']);
+            Route::patch('/agents/{id}', [AgentController::class, 'update'])
+                ->middleware('permission:agents.manage');
+            Route::post('/agents/{id}/runs', [AgentController::class, 'run'])
+                ->middleware('permission:agents.manage');
+
+            // Phase 4: Workflows & Human-in-the-Loop Approval Inbox
+            Route::get('/workflows', [WorkflowController::class, 'index']);
+            Route::post('/workflows', [WorkflowController::class, 'store'])
+                ->middleware('permission:workflows.manage');
+            Route::post('/workflows/templates/compliance-report', [WorkflowController::class, 'seedComplianceTemplate'])
+                ->middleware('permission:workflows.manage');
+            Route::get('/workflows/runs', [WorkflowController::class, 'listRuns']);
+            Route::get('/workflows/runs/{runId}', [WorkflowController::class, 'showRun']);
+            Route::post('/workflows/{id}/runs', [WorkflowController::class, 'launchRun'])
+                ->middleware('permission:workflows.manage');
+
+            Route::get('/approvals', [ApprovalController::class, 'index'])
+                ->middleware('permission:approvals.act');
+            Route::get('/approvals/{id}', [ApprovalController::class, 'show'])
+                ->middleware('permission:approvals.act');
+            Route::post('/approvals/{id}/approve', [ApprovalController::class, 'approve'])
+                ->middleware('permission:approvals.act');
+            Route::post('/approvals/{id}/reject', [ApprovalController::class, 'reject'])
+                ->middleware('permission:approvals.act');
+
+            // Phase 4: AI Usage Analytics & Evaluation Harness
+            Route::get('/analytics/overview', [AnalyticsController::class, 'overview'])
+                ->middleware('permission:analytics.view');
+            Route::get('/analytics/usage', [AnalyticsController::class, 'usage'])
+                ->middleware('permission:analytics.view');
+
+            Route::get('/evaluations/datasets', [EvaluationController::class, 'listDatasets'])
+                ->middleware('permission:analytics.view');
+            Route::post('/evaluations/datasets', [EvaluationController::class, 'storeDataset'])
+                ->middleware('permission:analytics.view');
+            Route::post('/evaluations/datasets/seed-benchmark', [EvaluationController::class, 'seedBenchmark'])
+                ->middleware('permission:analytics.view');
+            Route::get('/evaluations/runs', [EvaluationController::class, 'listRuns'])
+                ->middleware('permission:analytics.view');
+            Route::post('/evaluations/runs', [EvaluationController::class, 'runEvaluation'])
+                ->middleware('permission:analytics.view');
+            Route::get('/evaluations/runs/{runId}', [EvaluationController::class, 'showRun'])
+                ->middleware('permission:analytics.view');
+
+            // Phase 1 & Phase 4: Tamper-Evident Security Audit & Chain Verification
             Route::get('/audit-logs', [AuditLogController::class, 'index'])
+                ->middleware('permission:audit.view');
+            Route::get('/audit-logs/verify-chain', [AuditLogController::class, 'verifyChain'])
+                ->middleware('permission:audit.view');
+            Route::get('/security-events', [AuditLogController::class, 'securityEvents'])
                 ->middleware('permission:audit.view');
         });
     });

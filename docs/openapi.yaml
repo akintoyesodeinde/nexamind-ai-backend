@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: NexaMind AI REST API
-  version: 1.0.0-phase3
+  version: 1.0.0-phase4
   description: >
     Enterprise Generative AI Knowledge & Workflow Automation Platform API.
     All tenant-scoped endpoints require an authenticated Sanctum session or bearer token
@@ -18,6 +18,11 @@ tags:
   - name: Retrieval
   - name: AI
   - name: Conversations
+  - name: Agents
+  - name: Workflows
+  - name: Approvals
+  - name: Analytics
+  - name: Evaluations
   - name: Audit
 components:
   securitySchemes:
@@ -426,6 +431,184 @@ paths:
       summary: Submit positive or negative quality feedback on an assistant response
       responses:
         '200': { description: Updated message feedback }
+  /agents/tools:
+    get:
+      tags: [Agents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List hard-allowlisted enterprise agent tools and their JSON Schemas
+      responses:
+        '200': { description: Allowlisted tools catalog }
+  /agents:
+    get:
+      tags: [Agents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List configured tenant AI agents
+      responses:
+        '200': { description: Agent list }
+    post:
+      tags: [Agents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Create a controlled AI agent with allowlisted tools and bounded step limits
+      responses:
+        '201': { description: Agent created }
+        '403': { description: Unlisted tool blocked or insufficient role }
+  /agents/{id}/runs:
+    post:
+      tags: [Agents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Launch a bounded stateful agent run with schema-validated tool execution
+      responses:
+        '201': { description: Agent run trace }
+        '403': { description: Tool security policy violation }
+  /agents/runs:
+    get:
+      tags: [Agents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List tenant agent execution history
+      responses:
+        '200': { description: Agent runs }
+  /agents/runs/{runId}:
+    get:
+      tags: [Agents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: runId, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Inspect step-by-step agent run execution trace
+      responses:
+        '200': { description: Agent run with ordered step trace }
+  /workflows:
+    get:
+      tags: [Workflows]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List tenant workflow definitions
+      responses:
+        '200': { description: Workflow definitions }
+    post:
+      tags: [Workflows]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Create a governed multi-step workflow definition
+      responses:
+        '201': { description: Workflow definition created }
+  /workflows/templates/compliance-report:
+    post:
+      tags: [Workflows]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Seed or fetch the flagship AI Compliance Report Workflow template
+      responses:
+        '201': { description: Compliance Report Workflow template }
+  /workflows/{id}/runs:
+    post:
+      tags: [Workflows]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Launch an idempotent workflow run (supports Idempotency-Key header)
+      responses:
+        '201': { description: Workflow run created }
+  /workflows/runs:
+    get:
+      tags: [Workflows]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List tenant workflow execution runs
+      responses:
+        '200': { description: Workflow runs }
+  /approvals:
+    get:
+      tags: [Approvals]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List human-in-the-loop approval requests in the Approval Inbox
+      responses:
+        '200': { description: Approval queue }
+  /approvals/{id}/approve:
+    post:
+      tags: [Approvals]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Atomically approve a pending action and trigger gated artifact publication (idempotent)
+      responses:
+        '200': { description: Approval confirmed and artifact published }
+        '403': { description: Insufficient approver role }
+        '409': { description: Conflicting prior decision }
+  /approvals/{id}/reject:
+    post:
+      tags: [Approvals]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Atomically reject a pending approval and cancel linked runs
+      responses:
+        '200': { description: Approval rejected }
+  /analytics/overview:
+    get:
+      tags: [Analytics]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Tenant-scoped KPI overview across tokens, cost USD, latency, automation, and evaluations
+      responses:
+        '200': { description: Analytics overview }
+  /analytics/usage:
+    get:
+      tags: [Analytics]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Breakdown of AI usage and DECIMAL(18,6) cost by model, operation, day, and consumer
+      responses:
+        '200': { description: Usage breakdown }
+  /evaluations/datasets:
+    get:
+      tags: [Evaluations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List evaluation datasets and test cases
+      responses:
+        '200': { description: Evaluation datasets }
+    post:
+      tags: [Evaluations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Create a curated RAG evaluation dataset
+      responses:
+        '201': { description: Evaluation dataset created }
+  /evaluations/datasets/seed-benchmark:
+    post:
+      tags: [Evaluations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Seed curated Enterprise Policy & Abstention Benchmark dataset
+      responses:
+        '201': { description: Benchmark dataset }
+  /evaluations/runs:
+    get:
+      tags: [Evaluations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List historical evaluation benchmark runs
+      responses:
+        '200': { description: Evaluation runs }
+    post:
+      tags: [Evaluations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Execute an evaluation dataset measuring citation correctness, groundedness, and abstention
+      responses:
+        '201': { description: Evaluation run results }
   /audit-logs:
     get:
       tags: [Audit]
@@ -437,3 +620,19 @@ paths:
           description: Paginated audit log entries
         '403':
           description: Forbidden for Member/Viewer or cross-tenant access
+  /audit-logs/verify-chain:
+    get:
+      tags: [Audit]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Verify SHA-256 hash-chain integrity of all tenant audit logs
+      responses:
+        '200': { description: Hash-chain verification status }
+  /security-events:
+    get:
+      tags: [Audit]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Search tenant-scoped security events by severity and type
+      responses:
+        '200': { description: Paginated security events }
