@@ -68,6 +68,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Ensure Microsoft ODBC Driver 18 for SQL Server
+        run: |
+          if ! odbcinst -q -d 2>/dev/null | grep -qi "ODBC Driver 18 for SQL Server"; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq curl gnupg2 ca-certificates unixodbc unixodbc-dev
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+            UBUNTU_VER=$(. /etc/os-release && echo "${VERSION_ID}")
+            UBUNTU_CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME}")
+            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/${UBUNTU_VER}/prod ${UBUNTU_CODENAME} main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update -qq
+            sudo ACCEPT_EULA=Y apt-get install -y -qq msodbcsql18
+          fi
+          odbcinst -q -d
+
       - name: Setup PHP 8.4 with ODBC 18 & PDO_SQLSRV
         uses: shivammathur/setup-php@v2
         with:
@@ -80,6 +94,7 @@ jobs:
         run: |
           php -v
           php -m | grep -iE "sqlsrv|bcmath|intl|zip"
+          odbcinst -q -d
 
       - name: Validate composer.json and install dependencies
         run: |
@@ -101,15 +116,25 @@ jobs:
           php artisan key:generate --force
           php <<'EOF'
           <?php
-          $pdo = new PDO(
-              'sqlsrv:Server=127.0.0.1,1433;Database=master;Encrypt=yes;TrustServerCertificate=true',
-              'sa',
-              'NexaMind_CI_Pass2026!'
-          );
-          $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-          $pdo->exec("IF DB_ID(N'nexamind') IS NULL CREATE DATABASE [nexamind];");
-          $pdo->exec("IF DB_ID(N'nexamind_test') IS NULL CREATE DATABASE [nexamind_test];");
-          echo "Created disposable CI databases: nexamind, nexamind_test\n";
+          $dsn = 'sqlsrv:Server=127.0.0.1,1433;Database=master;Encrypt=1;TrustServerCertificate=1';
+          $lastError = 'unknown';
+          for ($attempt = 1; $attempt <= 15; $attempt++) {
+              try {
+                  $pdo = new PDO($dsn, 'sa', 'NexaMind_CI_Pass2026!', [
+                      PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                  ]);
+                  $pdo->exec("IF DB_ID(N'nexamind') IS NULL CREATE DATABASE [nexamind];");
+                  $pdo->exec("IF DB_ID(N'nexamind_test') IS NULL CREATE DATABASE [nexamind_test];");
+                  echo "Created disposable CI databases: nexamind, nexamind_test (attempt {$attempt})\n";
+                  exit(0);
+              } catch (Throwable $e) {
+                  $lastError = $e->getMessage();
+                  fwrite(STDERR, "Attempt {$attempt} failed: {$lastError}\n");
+                  sleep(3);
+              }
+          }
+          echo "::error::Failed to prepare disposable SQL Server 2025 databases: {$lastError}\n";
+          exit(1);
           EOF
 
       - name: Probe SQL Server 2025 & Native VECTOR(1536)
