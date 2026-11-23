@@ -5,9 +5,13 @@ declare(strict_types=1);
 namespace App\Providers;
 
 use App\Domain\AI\Contracts\EmbeddingProviderInterface;
+use App\Domain\AI\Contracts\LlmProviderInterface;
 use App\Domain\AI\Providers\DeterministicMockEmbeddingProvider;
+use App\Domain\AI\Providers\DeterministicMockLlmProvider;
 use App\Domain\AI\Providers\GeminiEmbeddingProvider;
+use App\Domain\AI\Providers\GeminiLlmProvider;
 use App\Domain\AI\Providers\OpenAiEmbeddingProvider;
+use App\Domain\AI\Providers\OpenAiLlmProvider;
 use App\Domain\Audit\Contracts\AuditLoggerInterface;
 use App\Domain\Audit\Services\AuditLogger;
 use App\Domain\Documents\Contracts\DocumentStorageInterface;
@@ -55,6 +59,22 @@ class AppServiceProvider extends ServiceProvider
                     dimensions: $dims,
                 ),
                 default => new DeterministicMockEmbeddingProvider(dimensions: $dims),
+            };
+        });
+
+        $this->app->singleton(LlmProviderInterface::class, function (): LlmProviderInterface {
+            $provider = strtolower((string) config('ai.default_provider', 'mock'));
+
+            return match ($provider) {
+                'openai' => new OpenAiLlmProvider(
+                    apiKey: (string) config('ai.providers.openai.api_key', ''),
+                    baseUrl: (string) config('ai.providers.openai.base_url', 'https://api.openai.com/v1'),
+                ),
+                'gemini' => new GeminiLlmProvider(
+                    apiKey: (string) config('ai.providers.gemini.api_key', ''),
+                    baseUrl: (string) config('ai.providers.gemini.base_url', 'https://generativelanguage.googleapis.com/v1beta'),
+                ),
+                default => new DeterministicMockLlmProvider,
             };
         });
 

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Domain\AI\Exceptions\QuotaExceededException;
 use App\Http\Middleware\IdempotencyMiddleware;
 use App\Http\Middleware\RequestIdMiddleware;
 use App\Http\Middleware\RequirePermission;
@@ -81,6 +82,14 @@ return Application::configure(basePath: dirname(__DIR__))
             }
 
             return ApiResponse::error('NOT_FOUND', 'The requested resource was not found.', 404, null, $request);
+        });
+
+        $exceptions->render(function (QuotaExceededException $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return ApiResponse::error('QUOTA_EXCEEDED', $e->getMessage(), 429, $e->quotaDetails, $request);
         });
 
         $exceptions->render(function (ThrottleRequestsException $e, Request $request) {

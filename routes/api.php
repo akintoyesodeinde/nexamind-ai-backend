@@ -2,9 +2,12 @@
 
 declare(strict_types=1);
 
+use App\Http\Controllers\Api\V1\AiModelController;
 use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\ConversationController;
 use App\Http\Controllers\Api\V1\DocumentController;
+use App\Http\Controllers\Api\V1\DocumentIntelligenceController;
 use App\Http\Controllers\Api\V1\HealthController;
 use App\Http\Controllers\Api\V1\KnowledgeBaseController;
 use App\Http\Controllers\Api\V1\RetrievalController;
@@ -61,6 +64,8 @@ Route::prefix('v1')->group(function (): void {
             Route::get('/documents', [DocumentController::class, 'index']);
             Route::post('/documents', [DocumentController::class, 'store'])
                 ->middleware('permission:documents.upload');
+            Route::post('/documents/compare', [DocumentIntelligenceController::class, 'compare'])
+                ->middleware('permission:chat.ask');
             Route::get('/documents/{id}', [DocumentController::class, 'show']);
             Route::get('/documents/{id}/status', [DocumentController::class, 'status']);
             Route::get('/documents/{id}/versions', [DocumentController::class, 'versions']);
@@ -68,10 +73,31 @@ Route::prefix('v1')->group(function (): void {
             Route::get('/documents/{id}/download-url', [DocumentController::class, 'downloadUrl']);
             Route::get('/documents/{id}/permissions', [DocumentController::class, 'permissions']);
             Route::put('/documents/{id}/permissions', [DocumentController::class, 'syncPermissions']);
+            Route::post('/documents/{id}/analyze', [DocumentIntelligenceController::class, 'analyze'])
+                ->middleware('permission:chat.ask');
             Route::delete('/documents/{id}', [DocumentController::class, 'destroy']);
 
             // Phase 2: Pre-Retrieval ACL-Enforced Vector Search
             Route::post('/retrieval/search', [RetrievalController::class, 'search'])
+                ->middleware('permission:chat.ask');
+
+            // Phase 3: AI Models, Grounded RAG Conversations & SSE Streaming
+            Route::get('/ai/models', [AiModelController::class, 'index']);
+            Route::get('/conversations', [ConversationController::class, 'index'])
+                ->middleware('permission:chat.ask');
+            Route::post('/conversations', [ConversationController::class, 'store'])
+                ->middleware('permission:chat.ask');
+            Route::get('/conversations/{id}', [ConversationController::class, 'show'])
+                ->middleware('permission:chat.ask');
+            Route::patch('/conversations/{id}', [ConversationController::class, 'update'])
+                ->middleware('permission:chat.ask');
+            Route::delete('/conversations/{id}', [ConversationController::class, 'destroy'])
+                ->middleware('permission:chat.ask');
+            Route::post('/conversations/{id}/messages', [ConversationController::class, 'storeMessage'])
+                ->middleware('permission:chat.ask');
+            Route::get('/conversations/{id}/stream', [ConversationController::class, 'stream'])
+                ->middleware('permission:chat.ask');
+            Route::post('/messages/{messageId}/feedback', [ConversationController::class, 'feedback'])
                 ->middleware('permission:chat.ask');
 
             Route::get('/audit-logs', [AuditLogController::class, 'index'])

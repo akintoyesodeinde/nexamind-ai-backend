@@ -92,8 +92,12 @@ final class DocumentIngestionAndRetrievalTest extends TestCase
         $publicSasUrl = (string) $dlResp->json('data.download_url');
         $this->assertStringContainsString('sig=', $publicSasUrl);
 
-        // Translate localhost public endpoint to internal Docker Azurite hostname to verify live SAS fetch
-        $internalSasUrl = str_replace('http://127.0.0.1:10000', 'http://azurite:10000', $publicSasUrl);
+        // Translate public blob endpoint to the configured internal BlobEndpoint (works in both Docker and GitHub Actions CI)
+        $connStr = (string) config('ai.storage.connection_string');
+        preg_match('/BlobEndpoint=([^;]+)/', $connStr, $epMatch);
+        $internalEndpoint = rtrim($epMatch[1] ?? 'http://azurite:10000/devstoreaccount1', '/');
+        $publicEndpoint = rtrim((string) config('ai.storage.public_blob_endpoint', $internalEndpoint), '/');
+        $internalSasUrl = str_replace($publicEndpoint, $internalEndpoint, $publicSasUrl);
         $sasFetch = Http::timeout(10)->get($internalSasUrl);
         $this->assertTrue($sasFetch->successful(), 'Azurite SAS download failed: '.$sasFetch->status());
         $this->assertStringContainsString('Credit Committee approval', $sasFetch->body());

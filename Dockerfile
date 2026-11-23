@@ -2,7 +2,7 @@ FROM php:8.4-fpm-bookworm AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && apt-get install -y --no-install-recommends \
         apt-transport-https \
         ca-certificates \
         curl \
@@ -70,5 +70,10 @@ FROM base AS production
 
 ENV APP_ENV=production
 COPY . /var/www/html
-RUN composer install --no-dev --optimize-autoloader --no-interaction --no-progress \
+RUN mkdir -p /var/www/html/storage/framework/cache \
+        /var/www/html/storage/framework/sessions \
+        /var/www/html/storage/framework/views \
+        /var/www/html/storage/logs \
+        /var/www/html/bootstrap/cache \
+    && composer install --no-dev --optimize-autoloader --no-interaction --no-progress \
     && chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache

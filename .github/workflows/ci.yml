@@ -1,0 +1,158 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-and-tests:
+    name: PHP 8.4 Quality, Migrations & SQL Server 2025 Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2025-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: NexaMind_CI_Pass2026!
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'NexaMind_CI_Pass2026!' -C -Q 'SELECT 1' -b || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 18
+          --health-start-period 25s
+
+      azurite:
+        image: mcr.microsoft.com/azure-storage/azurite:latest
+        ports:
+          - 10000:10000
+        options: >-
+          --health-cmd "node -e \"require('net').connect(10000,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\""
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DB_CONNECTION: sqlsrv
+      DB_HOST: 127.0.0.1
+      DB_PORT: 1433
+      DB_DATABASE: nexamind
+      DB_TEST_HOST: 127.0.0.1
+      DB_TEST_PORT: 1433
+      DB_TEST_DATABASE: nexamind_test
+      DB_USERNAME: sa
+      DB_PASSWORD: NexaMind_CI_Pass2026!
+      DB_ENCRYPT: "yes"
+      DB_TRUST_SERVER_CERTIFICATE: "true"
+      AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+      AZURE_STORAGE_CONTAINER: nexamind-documents
+      AZURE_STORAGE_PUBLIC_ENDPOINT: http://127.0.0.1:10000/devstoreaccount1
+      AI_DEFAULT_PROVIDER: mock
+      AI_EMBEDDING_DIMENSIONS: 1536
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.4 with ODBC 18 & PDO_SQLSRV
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: bcmath, intl, mbstring, pdo, sqlsrv, pdo_sqlsrv, xml, zip
+          tools: composer:v2
+          coverage: none
+
+      - name: Verify PHP & SQLSRV extensions
+        run: |
+          php -v
+          php -m | grep -iE "sqlsrv|bcmath|intl|zip"
+
+      - name: Validate composer.json and install dependencies
+        run: |
+          composer validate --no-check-publish
+          composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Audit PHP dependencies for security advisories
+        run: composer audit --no-interaction
+
+      - name: Check code style (Laravel Pint)
+        run: ./vendor/bin/pint --test
+
+      - name: Run static analysis (Larastan / PHPStan)
+        run: ./vendor/bin/phpstan analyse --memory-limit=512M
+
+      - name: Prepare environment and disposable SQL Server 2025 databases
+        run: |
+          cp .env.example .env
+          php artisan key:generate --force
+          php <<'EOF'
+          <?php
+          $pdo = new PDO(
+              'sqlsrv:Server=127.0.0.1,1433;Database=master;Encrypt=yes;TrustServerCertificate=true',
+              'sa',
+              'NexaMind_CI_Pass2026!'
+          );
+          $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+          $pdo->exec("IF DB_ID(N'nexamind') IS NULL CREATE DATABASE [nexamind];");
+          $pdo->exec("IF DB_ID(N'nexamind_test') IS NULL CREATE DATABASE [nexamind_test];");
+          echo "Created disposable CI databases: nexamind, nexamind_test\n";
+          EOF
+
+      - name: Probe SQL Server 2025 & Native VECTOR(1536)
+        run: php artisan nexamind:probe-sqlserver
+
+      - name: Verify migrations and seeders on disposable SQL Server database
+        run: php artisan migrate:fresh --seed --force
+
+      - name: Run Unit, Feature, Integration & Security test suites
+        env:
+          APP_ENV: testing
+          DB_CONNECTION: sqlsrv_testing
+          DB_TEST_DATABASE: nexamind_test
+        run: ./vendor/bin/phpunit --testdox
+
+  docker-build-and-scan:
+    name: Build & Scan Production Docker Image
+    needs: quality-and-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build production Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: production
+          load: true
+          tags: nexamind-ai-backend:ci-${{ github.sha }}
+
+      - name: Scan container image with Trivy (fail on fixable CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: nexamind-ai-backend:ci-${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: NexaMind AI REST API
-  version: 1.0.0-phase2
+  version: 1.0.0-phase3
   description: >
     Enterprise Generative AI Knowledge & Workflow Automation Platform API.
     All tenant-scoped endpoints require an authenticated Sanctum session or bearer token
@@ -16,6 +16,8 @@ tags:
   - name: Knowledge
   - name: Documents
   - name: Retrieval
+  - name: AI
+  - name: Conversations
   - name: Audit
 components:
   securitySchemes:
@@ -342,6 +344,88 @@ paths:
       responses:
         '200': { description: Ranked authorized document chunks }
         '403': { description: Unauthorized or cross-tenant knowledge base requested }
+  /ai/models:
+    get:
+      tags: [AI]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List active AI chat and embedding model aliases available to the tenant
+      responses:
+        '200': { description: Active AI models }
+  /documents/{id}/analyze:
+    post:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Run grounded AI summarize, classify, or extract_structured analysis on an authorized document
+      responses:
+        '200': { description: Structured AI document analysis with usage and cost }
+  /documents/compare:
+    post:
+      tags: [Documents]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Compare two ACL-authorized documents side-by-side
+      responses:
+        '200': { description: Grounded policy comparison }
+  /conversations:
+    get:
+      tags: [Conversations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List active tenant-scoped conversations owned by the caller
+      responses:
+        '200': { description: Conversation list }
+    post:
+      tags: [Conversations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Start a new grounded AI conversation
+      responses:
+        '201': { description: Conversation created }
+  /conversations/{id}:
+    get:
+      tags: [Conversations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Retrieve conversation details, message history, and verified citations
+      responses:
+        '200': { description: Conversation transcript }
+  /conversations/{id}/messages:
+    post:
+      tags: [Conversations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Submit a grounded RAG question and receive verified citations, usage, and cost
+      responses:
+        '201': { description: Grounded AI answer or safe abstention }
+        '429': { description: Tenant monthly token or USD cost quota exceeded }
+  /conversations/{id}/stream:
+    get:
+      tags: [Conversations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Stream grounded AI response via Server-Sent Events (message.started, message.delta, message.completed, message.failed)
+      responses:
+        '200': { description: text/event-stream SSE response }
+  /messages/{messageId}/feedback:
+    post:
+      tags: [Conversations]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - { name: messageId, in: path, required: true, schema: { type: string, format: uuid } }
+      summary: Submit positive or negative quality feedback on an assistant response
+      responses:
+        '200': { description: Updated message feedback }
   /audit-logs:
     get:
       tags: [Audit]
