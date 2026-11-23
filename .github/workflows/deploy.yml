@@ -1,0 +1,152 @@
+name: Deploy Backend to Azure Container Apps (OIDC)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target GitHub Environment
+        required: true
+        default: azure-dev
+        type: choice
+        options:
+          - azure-dev
+      run_what_if_only:
+        description: Preview Bicep changes via what-if without deploying
+        required: true
+        default: false
+        type: boolean
+      ai_default_provider:
+        description: Default AI provider in sandbox
+        required: true
+        default: mock
+        type: choice
+        options:
+          - mock
+          - openai
+          - gemini
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: backend-deploy-${{ inputs.environment || 'azure-dev' }}
+  cancel-in-progress: false
+
+jobs:
+  build-scan-and-deploy:
+    name: Build, Scan, Bicep What-If & Deploy API/Worker
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'azure-dev' }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compute immutable release tags
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "rev_suffix=rev-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build production backend image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: production
+          load: true
+          tags: nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}
+
+      - name: Scan production image with Trivy (fail on fixable CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL
+
+      - name: Authenticate to Azure via Microsoft Entra OIDC (Zero Secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Preview Azure Bicep Infrastructure (what-if)
+        env:
+          NEXAMIND_SQL_ADMIN_PASSWORD: ${{ secrets.NEXAMIND_SQL_ADMIN_PASSWORD }}
+          NEXAMIND_APP_KEY: ${{ secrets.NEXAMIND_APP_KEY }}
+        run: |
+          az deployment group what-if \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infrastructure/azure/main.bicep \
+            --parameters infrastructure/azure/parameters.dev.bicepparam \
+            --parameters backendImageTag="${{ steps.meta.outputs.image_tag }}" \
+            --parameters aiDefaultProvider="${{ inputs.ai_default_provider || 'mock' }}"
+
+      - name: Push immutable image to Azure Container Registry
+        if: ${{ !inputs.run_what_if_only }}
+        run: |
+          ACR_NAME="${{ vars.AZURE_ACR_NAME }}"
+          ACR_SERVER="${ACR_NAME}.azurecr.io"
+          az acr login --name "${ACR_NAME}"
+          docker tag "nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}" "${ACR_SERVER}/nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}"
+          docker push "${ACR_SERVER}/nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}"
+
+      - name: Deploy Azure Infrastructure & Update Container App Revision
+        if: ${{ !inputs.run_what_if_only }}
+        env:
+          NEXAMIND_SQL_ADMIN_PASSWORD: ${{ secrets.NEXAMIND_SQL_ADMIN_PASSWORD }}
+          NEXAMIND_APP_KEY: ${{ secrets.NEXAMIND_APP_KEY }}
+        run: |
+          az deployment group create \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --name "nexamind-backend-${{ steps.meta.outputs.short_sha }}" \
+            --template-file infrastructure/azure/main.bicep \
+            --parameters infrastructure/azure/parameters.dev.bicepparam \
+            --parameters backendImageTag="${{ steps.meta.outputs.image_tag }}" \
+            --parameters aiDefaultProvider="${{ inputs.ai_default_provider || 'mock' }}"
+
+          ACR_SERVER="${{ vars.AZURE_ACR_NAME }}.azurecr.io"
+          az containerapp update \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --name ca-nexamind-api \
+            --image "${ACR_SERVER}/nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}" \
+            --revision-suffix "${{ steps.meta.outputs.rev_suffix }}"
+
+          az containerapp job update \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --name caj-nexamind-worker \
+            --image "${ACR_SERVER}/nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}"
+
+      - name: Post-Deploy Health & Readiness Smoke Test
+        if: ${{ !inputs.run_what_if_only }}
+        run: |
+          API_FQDN=$(az containerapp show \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --name ca-nexamind-api \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+
+          echo "Verifying https://${API_FQDN}/api/v1/health/live and /ready..."
+          for i in $(seq 1 12); do
+            if curl -fsS "https://${API_FQDN}/api/v1/health/ready"; then
+              echo ""
+              echo "Backend readiness probe succeeded!"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Backend readiness probe failed after deployment."
+          exit 1

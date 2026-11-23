@@ -181,3 +181,42 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           severity: CRITICAL
+
+  iac-bicep-and-workflow-validation:
+    name: Lint & Compile Azure Bicep IaC and Validate Workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install / verify Azure Bicep CLI
+        run: |
+          az version
+          az bicep install || az bicep upgrade
+          az bicep version
+
+      - name: Lint and compile all Azure Bicep modules and parameters
+        env:
+          NEXAMIND_SQL_ADMIN_PASSWORD: CI_Validation_Placeholder_Pass2026!
+          NEXAMIND_APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+        run: |
+          for file in infrastructure/azure/main.bicep infrastructure/azure/modules/*.bicep; do
+            echo "Linting ${file}..."
+            az bicep lint --file "${file}"
+          done
+          az bicep build --file infrastructure/azure/main.bicep --outfile /tmp/nexamind-main.json
+          az bicep build-params --file infrastructure/azure/parameters.dev.bicepparam --outfile /tmp/nexamind-dev.parameters.json
+          echo "Bicep templates and parameters compiled cleanly!"
+
+      - name: Validate GitHub Actions workflow YAML files
+        run: |
+          python3 - <<'EOF'
+          import glob, yaml
+          for path in sorted(glob.glob('.github/workflows/*.yml')):
+              with open(path, 'r', encoding='utf-8') as f:
+                  data = yaml.safe_load(f)
+              assert isinstance(data, dict) and 'jobs' in data, f"Invalid workflow: {path}"
+              print(f"Valid workflow YAML: {path}")
+          EOF
