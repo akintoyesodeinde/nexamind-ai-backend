@@ -9,22 +9,25 @@ param databaseName string = 'nexamind'
 @description('Azure region for deployment.')
 param location string = resourceGroup().location
 
-@description('SQL Server administrator login username.')
+@description('SQL Server administrator login username (used for initial bootstrap only; runtime app uses least-privilege nexamind_app).')
 param administratorLogin string = 'nexamindadmin'
 
-@description('SQL Server administrator password (supplied securely at deploy time, never committed).')
+@description('SQL Server administrator password (supplied securely at deployment time).')
 @secure()
 param administratorLoginPassword string
 
-@description('Enable Azure SQL Free Offer limits with automatic pause on exhaustion.')
+@description('Static Public IP address of the NexaMind Linux VM allowed through the Azure SQL firewall (TCP 1433 is NEVER opened to 0.0.0.0/0).')
+param vmPublicIpAddress string
+
+@description('Optional trusted laptop IPv4 address for initial least-privilege DB user bootstrap (leave empty after setup).')
+param adminBootstrapIpAddress string = ''
+
+@description('Enable Azure SQL Database Free Offer limits with AutoPause on exhaustion.')
 param useFreeLimit bool = true
 
-@description('Auto-pause delay in minutes for serverless compute (60 = 1 hour).')
+@description('Serverless auto-pause delay in minutes (60 = 1 hour).')
 @minValue(60)
 param autoPauseDelayMinutes int = 60
-
-@description('Allow Azure services (Container Apps) to reach the logical SQL Server firewall.')
-param allowAzureServicesFirewall bool = true
 
 @description('Resource tags.')
 param tags object = {}
@@ -42,16 +45,26 @@ resource sqlServer 'Microsoft.Sql/servers@2023-08-01' = {
   }
 }
 
-resource allowAzureServices 'Microsoft.Sql/servers/firewallRules@2023-08-01' = if (allowAzureServicesFirewall) {
+// Strictly permit ONLY the NexaMind Linux VM static IP (no public internet 0.0.0.0/0 exposure)
+resource allowVmStaticIp 'Microsoft.Sql/servers/firewallRules@2023-08-01' = {
   parent: sqlServer
-  name: 'AllowAllWindowsAzureIps'
+  name: 'Allow-NexaMind-VM-Static-IP'
   properties: {
-    startIpAddress: '0.0.0.0'
-    endIpAddress: '0.0.0.0'
+    startIpAddress: vmPublicIpAddress
+    endIpAddress: vmPublicIpAddress
   }
 }
 
-// Azure SQL Serverless Gen5 configured for Azure SQL Free Offer (32 GB max, native VECTOR GA)
+resource allowAdminBootstrapIp 'Microsoft.Sql/servers/firewallRules@2023-08-01' = if (!empty(adminBootstrapIpAddress)) {
+  parent: sqlServer
+  name: 'Allow-Admin-Bootstrap-IP'
+  properties: {
+    startIpAddress: adminBootstrapIpAddress
+    endIpAddress: adminBootstrapIpAddress
+  }
+}
+
+// Azure SQL Database Free Offer: 100,000 vCore-seconds/mo + 32 GB data + 32 GB backup + native VECTOR GA
 resource sqlDatabase 'Microsoft.Sql/servers/databases@2023-08-01' = {
   parent: sqlServer
   name: databaseName
@@ -65,7 +78,7 @@ resource sqlDatabase 'Microsoft.Sql/servers/databases@2023-08-01' = {
   }
   properties: {
     collation: 'SQL_Latin1_General_CP1_CI_AS'
-    maxSizeBytes: 34359738368 // 32 GB Free Offer cap
+    maxSizeBytes: 34359738368
     minCapacity: json('0.5')
     autoPauseDelay: autoPauseDelayMinutes
     useFreeLimit: useFreeLimit

@@ -183,7 +183,7 @@ jobs:
           severity: CRITICAL
 
   iac-bicep-and-workflow-validation:
-    name: Lint & Compile Azure Bicep IaC and Validate Workflows
+    name: Lint & Compile Azure Bicep IaC, Cloud-Init & Workflows
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -197,23 +197,38 @@ jobs:
           az bicep install || az bicep upgrade
           az bicep version
 
-      - name: Lint and compile all Azure Bicep modules and parameters
+      - name: Lint and compile all Azure Bicep modules, optional VMSS, and parameters
         env:
+          NEXAMIND_SSH_PUBLIC_KEY: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICIValidationDummyKeyOnlyNotForUse ci@nexamind.local"
+          NEXAMIND_ADMIN_CIDR: "203.0.113.10/32"
           NEXAMIND_SQL_ADMIN_PASSWORD: CI_Validation_Placeholder_Pass2026!
-          NEXAMIND_APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          NEXAMIND_ALERT_EMAIL: "alerts@example.com"
         run: |
           for file in infrastructure/azure/main.bicep infrastructure/azure/modules/*.bicep; do
             echo "Linting ${file}..."
             az bicep lint --file "${file}"
           done
           az bicep build --file infrastructure/azure/main.bicep --outfile /tmp/nexamind-main.json
-          az bicep build-params --file infrastructure/azure/parameters.dev.bicepparam --outfile /tmp/nexamind-dev.parameters.json
-          echo "Bicep templates and parameters compiled cleanly!"
+          az bicep build-params --file infrastructure/azure/parameters/dev.bicepparam --outfile /tmp/nexamind-dev.parameters.json
+          echo "All Bicep templates (including optional VMSS) and parameters compiled cleanly!"
 
-      - name: Validate GitHub Actions workflow YAML files
+      - name: Validate cloud-init, production Compose, and GitHub Actions YAML files
         run: |
           python3 - <<'EOF'
           import glob, yaml
+
+          with open('infrastructure/azure/cloud-init/nexamind-init.yaml', 'r', encoding='utf-8') as f:
+              raw = f.read()
+          assert raw.startswith('#cloud-config'), "cloud-init must start with #cloud-config"
+          ci_data = yaml.safe_load(raw)
+          assert isinstance(ci_data, dict) and 'runcmd' in ci_data, "Invalid cloud-init YAML"
+          print("Valid cloud-init YAML: infrastructure/azure/cloud-init/nexamind-init.yaml")
+
+          with open('docker/compose.prod.yaml', 'r', encoding='utf-8') as f:
+              compose = yaml.safe_load(f)
+          assert isinstance(compose, dict) and 'services' in compose, "Invalid compose.prod.yaml"
+          print("Valid Compose YAML: docker/compose.prod.yaml")
+
           for path in sorted(glob.glob('.github/workflows/*.yml')):
               with open(path, 'r', encoding='utf-8') as f:
                   data = yaml.safe_load(f)

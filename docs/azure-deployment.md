@@ -1,112 +1,37 @@
-# NexaMind AI — Azure Free Trial Sandbox Deployment & Entra OIDC Guide
+# NexaMind AI — Azure Free Trial Linux VM Deployment & Entra OIDC Reference
 
-This guide deploys NexaMind AI into a single Azure Free Trial resource group (`rg-nexamind-dev`) using modular Bicep IaC and **keyless Microsoft Entra ID OpenID Connect (OIDC)** from both independent GitHub repositories.
+NexaMind AI deploys to a single low-cost Azure Free Trial resource group (`rg-nexamind-dev`) using modular Bicep, `cloud-init`, Docker Compose, Docker Hub, Azure SQL Database Free Offer, and keyless **Microsoft Entra ID OIDC -> Azure VM Run Command** deployments.
 
-> **Important:** No live Azure resources are provisioned automatically during local development. Always run `az deployment group what-if` and review expected resource costs before executing `az deployment group create`.
+For the full 29-step beginner walkthrough from Windows PowerShell on your laptop (zero Azure Cloud Shell required), see **[docs/windows-powershell-azure-guide.md](windows-powershell-azure-guide.md)**.
 
 ---
 
-## 1. Target Azure Sandbox Architecture (`rg-nexamind-dev`)
+## 1. Resource Inventory (`infrastructure/azure/main.bicep`)
 
-| Resource | Name Pattern | SKU / Cost-Control Profile |
+| Module | Resources Provisioned | Key Security & Cost Guardrails |
 | :--- | :--- | :--- |
-| Resource Group | `rg-nexamind-dev` | Single sandbox RG for instant teardown |
-| User-Assigned Identity | `id-nexamind-dev` | `AcrPull` + `Storage Blob Data Contributor` |
-| Log Analytics | `log-nexamind-dev-<suffix>` | `PerGB2018`, 30-day retention, 1 GB/day cap |
-| Container Registry | `acrnexaminddev<suffix>` | `Basic`, admin user disabled |
-| Blob Storage | `stnexaminddev<suffix>` | `Standard_LRS`, private container `nexamind-documents`, TLS 1.2+ |
-| Azure SQL Database | `sql-nexamind-dev-<suffix>/nexamind` | Serverless `GP_S_Gen5` (2 vCore max, 0.5 min), **Free Offer (`useFreeLimit: true`, `AutoPause`)**, 32 GB cap, native `VECTOR` GA |
-| Container Apps Env | `cae-nexamind-dev` | Consumption workload profile |
-| Backend API | `ca-nexamind-api` | 0.5 vCPU / 1 GiB, **`minReplicas: 0`**, `maxReplicas: 2`, Multiple revisions |
-| Frontend SPA | `ca-nexamind-web` | 0.25 vCPU / 0.5 GiB, **`minReplicas: 0`**, `maxReplicas: 2`, Multiple revisions |
-| Queue Worker Job | `caj-nexamind-worker` | Scheduled Job (`*/5 * * * *`), `queue:work --stop-when-empty` |
-| Consumption Budget | `budget-nexamind-dev` | Monthly alerts at 50%, 80%, 100% Actual & Forecasted |
+| `modules/identity.bicep` | `id-nexamind-dev` | User-Assigned Managed Identity (zero stored Azure credentials on VM) |
+| `modules/nsg.bicep` | `nsg-nexamind-dev` | Allows 443/80 public, locks TCP 22 to your laptop `/32` CIDR only, explicitly denies inbound TCP 1433 |
+| `modules/network.bicep` | `vnet-nexamind-dev`, `snet-nexamind-app`, `pip-nexamind-dev` | Static Standard Public IPv4 (`~$3.65/mo`; billed even when VM stopped) |
+| `modules/vm.bicep` | `vm-nexamind-dev`, `nic-nexamind-dev`, 64 GiB OS disk | Ubuntu 24.04 LTS, free-eligible `Standard_B1s` / `Standard_B2ats_v2`, SSH Ed25519 key ONLY (`disablePasswordAuthentication: true`), `cloud-init` via `customData` (zero secrets) |
+| `modules/sql.bicep` *(optional, default `true`)* | `sql-nexamind-dev-<suffix>/nexamind` | Azure SQL Free Offer Serverless (`GP_S_Gen5`, `useFreeLimit: true`, `AutoPause`, 32 GB cap, TLS 1.2+), firewall pinned strictly to VM static IP |
+| `modules/storage.bicep` *(optional, default `true`)* | `stnexaminddev<suffix>` | `Standard_LRS`, `allowBlobPublicAccess: false`, TLS 1.2+, Managed Identity `Storage Blob Data Contributor` |
+| `modules/vmss.bicep` *(optional, default **`false`**)* | `vmss-nexamind-dev` | Flexible-orchestration VM Scale Set + `cloud-init` (future scaling option; NOT deployed initially to keep cost minimal) |
+| `modules/monitoring.bicep` | `log-nexamind-dev-<suffix>`, `budget-nexamind-dev` | 30-day retention, 1 GB/day cap, Consumption Budget alerts at 50%, 80%, 100% |
 
 ---
 
-## 2. One-Time Azure Resource Group & Entra OIDC Setup
+## 2. Single VM vs Azure VM Scale Sets (`modules/vmss.bicep`)
 
-```bash
-# 1. Authenticate locally to your Azure Free Trial subscription
-az login
-SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-TENANT_ID=$(az account show --query tenantId -o tsv)
-LOCATION="eastus2"
-RG="rg-nexamind-dev"
-
-# 2. Create single sandbox Resource Group
-az group create --name "$RG" --location "$LOCATION"
-
-# 3. Create Microsoft Entra ID App Registration & Service Principal
-APP_ID=$(az ad app create --display-name "github-nexamind-oidc-dev" --query appId -o tsv)
-az ad sp create --id "$APP_ID"
-
-# 4. Grant Contributor + User Access Administrator scoped ONLY to rg-nexamind-dev
-az role assignment create \
-  --assignee "$APP_ID" \
-  --role "Contributor" \
-  --scope "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RG}"
-
-az role assignment create \
-  --assignee "$APP_ID" \
-  --role "User Access Administrator" \
-  --scope "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RG}"
-
-# 5. Add Federated OIDC Credentials for BOTH independent GitHub repositories
-az ad app federated-credential create --id "$APP_ID" --parameters '{
-  "name": "nexamind-backend-azure-dev",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:akintoyesodeinde/nexamind-ai-backend:environment:azure-dev",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-
-az ad app federated-credential create --id "$APP_ID" --parameters '{
-  "name": "nexamind-frontend-azure-dev",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:akintoyesodeinde/nexamind-ai-frontend:environment:azure-dev",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-
-echo "AZURE_CLIENT_ID=$APP_ID"
-echo "AZURE_TENANT_ID=$TENANT_ID"
-echo "AZURE_SUBSCRIPTION_ID=$SUBSCRIPTION_ID"
-```
+| Dimension | Single Linux VM (Default Sandbox) | Flexible VM Scale Set (`deployVmss = true`) |
+| :--- | :--- | :--- |
+| **Scaling** | Vertical resize (`B1s` -> `B1ms`) | Automatic horizontal scale-out/scale-in across multiple VMs |
+| **Networking** | Direct Static Public IPv4 (~$3.65/mo) | Requires Azure Standard Load Balancer (~$18+/mo) or App Gateway |
+| **Availability** | Single instance with systemd + Docker restart | Multi-instance / Availability Zone fault tolerance |
+| **Free Trial Fit** | Fits 750h/mo 12-month free allowance (~$3.65–$4/mo total) | 2+ instances exhaust 750h/mo in <= 15 days + LB charges |
 
 ---
 
-## 3. Configure Protected GitHub Environments (`azure-dev`)
-
-In **both** `akintoyesodeinde/nexamind-ai-backend` and `akintoyesodeinde/nexamind-ai-frontend`:
-1. Go to **Settings -> Environments -> New environment -> `azure-dev`**.
-2. Enable **Required reviewers** (add yourself) so no cloud deployment executes without explicit approval.
-3. Configure **Environment Secrets**:
-   - `AZURE_CLIENT_ID` (from Step 2)
-   - `AZURE_TENANT_ID` (from Step 2)
-   - `AZURE_SUBSCRIPTION_ID` (from Step 2)
-   - *(Backend repo only)* `NEXAMIND_SQL_ADMIN_PASSWORD` (strong SQL password)
-   - *(Backend repo only)* `NEXAMIND_APP_KEY` (`php artisan key:generate --show`)
-4. Configure **Environment Variables**:
-   - `AZURE_RESOURCE_GROUP` = `rg-nexamind-dev`
-   - `AZURE_ACR_NAME` = `<acrName output from initial Bicep preview/deploy>`
-   - *(Frontend repo only)* `VITE_API_BASE_URL` = `https://<ca-nexamind-api-fqdn>/api/v1`
-
----
-
-## 4. Preview Infrastructure Changes (`what-if`) Before Provisioning
-
-```bash
-export NEXAMIND_SQL_ADMIN_PASSWORD="YourStrong_AzureSQL_Pass2026!"
-export NEXAMIND_APP_KEY="base64:YOUR_GENERATED_LARAVEL_KEY"
-
-az deployment group what-if \
-  --resource-group rg-nexamind-dev \
-  --template-file infrastructure/azure/main.bicep \
-  --parameters infrastructure/azure/parameters.dev.bicepparam
-```
-
-Review the `what-if` output carefully. Once approved, run either:
-- **GitHub Actions (Recommended):** Trigger **Deploy Backend to Azure Container Apps (OIDC)** (`deploy.yml`) with `run_what_if_only=false`, approve the `azure-dev` environment gate, then trigger **Deploy Frontend to Azure Container Apps (OIDC)** (`deploy.yml`).
-- **One-Click Teardown (Zero Residual Spend):**
-  ```bash
-  az group delete --name rg-nexamind-dev --yes --no-wait
-  ```
+## 3. Secure Azure SQL Networking & Private Endpoint Tradeoff
+- **Default Sandbox Configuration:** Azure SQL firewall allows **ONLY** the VM's static Public IP address over mandatory TLS 1.2+ (`DB_ENCRYPT=yes`, `DB_TRUST_SERVER_CERTIFICATE=false`), and runtime queries use the least-privilege `nexamind_app` SQL user ([docker/sqlserver/setup-app-user.sql](../docker/sqlserver/setup-app-user.sql)), never the server admin login. TCP `1433` is never exposed to `0.0.0.0/0` or opened inbound on the VM.
+- **Why Private Endpoint is Optional for Sandbox:** An Azure Private Endpoint + Private DNS Zone adds ~$7.30+/month in fixed hourly charges plus data processing fees. For production workloads beyond the Free Trial sandbox, attach a Private Endpoint to `snet-nexamind-app` and set `publicNetworkAccess: 'Disabled'` on `sql.bicep`.

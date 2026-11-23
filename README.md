@@ -35,18 +35,20 @@ docker compose exec backend ./vendor/bin/phpunit --testdox
 
 ---
 
-## CI/CD & Azure Free Trial Infrastructure
-- **CI (`.github/workflows/ci.yml`):** PHP 8.4 + ODBC 18 + `pdo_sqlsrv`, live SQL Server 2025 + Azurite containers, `composer audit`, Laravel Pint, Larastan Level 5, native `VECTOR(1536)` probe, migrations/seeders, 24 automated tests (Unit/Feature/Integration/Security), production Docker build + Trivy CRITICAL scan, and Azure Bicep lint/build validation.
-- **CD & Rollback (`.github/workflows/deploy.yml`, `.github/workflows/rollback.yml`):** Keyless Microsoft Entra OIDC (`azure/login@v2`), protected `azure-dev` environment approval, Bicep `what-if`, immutable `sha-` ACR tags, scale-to-zero Container Apps + scheduled worker job, and instant revision rollback.
+## CI/CD & Azure Free Trial Linux VM Infrastructure
+- **CI (`.github/workflows/ci.yml`):** PHP 8.4 + ODBC 18 + `pdo_sqlsrv`, live SQL Server 2025 + Azurite containers, `composer audit`, Laravel Pint, Larastan Level 5, native `VECTOR(1536)` probe, migrations/seeders, 24 automated tests (Unit/Feature/Integration/Security), production Docker build (`php:8.4.28-fpm-bookworm`) + Trivy CRITICAL scan, and Azure Bicep + `cloud-init` + Compose validation.
+- **CD & Rollback (`.github/workflows/deploy.yml`, `.github/workflows/rollback.yml`):** Publishes immutable `sha-` / SemVer tags to **Docker Hub**, authenticates to Azure via keyless **Microsoft Entra ID OIDC** (`azure/login@v2`), deploys safely to the Azure Linux VM via **Azure VM Run Command** (zero inbound SSH from GitHub runners), runs `php artisan migrate --force`, verifies `/api/v1/health/ready`, and supports one-click rollback.
+- **Azure IaC (`infrastructure/azure/`):** Single low-cost Ubuntu 24.04 LTS VM + `cloud-init` + Azure SQL Free Offer + private Blob Storage + optional Flexible VM Scale Set (`deployVmss=false` by default) + Windows PowerShell scripts (`infrastructure/scripts/`).
 
 ---
 
 ## Documentation Index
+- [Beginner 29-Step Windows PowerShell Azure Deployment Guide](docs/windows-powershell-azure-guide.md)
 - [OpenAPI 3.1 Specification](docs/openapi.yaml)
 - [System Architecture Reference](docs/architecture.md)
 - [Security Architecture & Controls](docs/security.md)
 - [Local Development Guide (8 GB RAM & Cloud-DB Profiles)](docs/local-development.md)
-- [Azure Free Trial Deployment & Entra OIDC Setup](docs/azure-deployment.md)
+- [Azure Free Trial Linux VM & Entra OIDC Reference](docs/azure-deployment.md)
 - [Cloud & AI Cost Control Guide](docs/cost-control.md)
 - [AI Evaluation & Groundedness Methodology](docs/ai-evaluation.md)
-- [Deployment & Rollback Runbook](docs/runbook-rollback.md)
+- [Deployment, Rollback & Disaster Recovery Runbook](docs/runbook-rollback.md)

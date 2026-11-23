@@ -1,53 +1,55 @@
 targetScope = 'resourceGroup'
 
-@description('Environment short name (e.g., dev, staging).')
+@description('Environment short name (dev or staging).')
 @allowed(['dev', 'staging'])
 param environmentName string = 'dev'
 
 @description('Azure region for all sandbox resources.')
 param location string = resourceGroup().location
 
-@description('Unique resource suffix (alphanumeric lowercase) to guarantee global uniqueness for ACR, SQL, and Storage.')
+@description('Short unique alphanumeric suffix for globally unique DNS, SQL, and Storage names.')
 @minLength(4)
-@maxLength(12)
-param uniqueSuffix string = take(uniqueString(resourceGroup().id), 8)
+@maxLength(10)
+param uniqueSuffix string = take(uniqueString(resourceGroup().id), 6)
 
-@description('Azure SQL administrator login username.')
+@description('Eligible low-cost burstable Linux VM size (e.g., Standard_B1s, Standard_B2ats_v2, or Standard_B1ms).')
+param vmSize string = 'Standard_B1s'
+
+@description('Linux administrator username for SSH key login.')
+param vmAdminUsername string = 'nexamindops'
+
+@description('SSH public key (contents of $HOME/.ssh/nexamind_azure.pub). Private key stays on your local laptop.')
+param vmSshPublicKey string
+
+@description('Trusted CIDR allowed to SSH (TCP 22) into the VM — e.g., YOUR_LAPTOP_PUBLIC_IP/32.')
+param adminAllowedCidr string
+
+@description('Provision Azure SQL Database Free Offer (recommended so SQL Server runs outside the 1 GiB VM).')
+param deploySql bool = true
+
+@description('Azure SQL administrator login username (initial setup only; runtime app uses least-privilege nexamind_app).')
 param sqlAdminLogin string = 'nexamindadmin'
 
 @description('Azure SQL administrator password (supplied securely at deployment time).')
 @secure()
-param sqlAdminPassword string
+param sqlAdminPassword string = ''
 
-@description('Laravel APP_KEY secret (supplied securely at deployment time).')
-@secure()
-param appKey string
+@description('Optional laptop IPv4 address temporarily permitted to create the least-privilege nexamind_app SQL user.')
+param sqlAdminBootstrapIp string = ''
 
-@description('Enable Azure SQL Free Offer limits with automatic pause on exhaustion.')
+@description('Enable Azure SQL Database Free Offer limits with AutoPause on exhaustion.')
 param sqlUseFreeLimit bool = true
 
-@description('Backend API container image tag in ACR (e.g., sha-abc1234 or latest).')
-param backendImageTag string = 'latest'
+@description('Provision private Azure Blob Storage account for organizational document uploads.')
+param deployStorage bool = true
 
-@description('Frontend SPA container image tag in ACR (e.g., sha-def5678 or latest).')
-param frontendImageTag string = 'latest'
+@description('OPTIONAL: Provision Flexible-Orchestration VM Scale Set (keep false for lowest-cost single-VM Free Trial sandbox).')
+param deployVmss bool = false
 
-@description('Default AI provider key.')
-@allowed(['mock', 'openai', 'gemini'])
-param aiDefaultProvider string = 'mock'
-
-@description('Optional OpenAI API key.')
-@secure()
-param openAiApiKey string = ''
-
-@description('Optional Gemini API key.')
-@secure()
-param geminiApiKey string = ''
-
-@description('Enable Azure Consumption Budget alerts (50%, 80%, 100%).')
+@description('Enable Azure Consumption Budget alerts at 50%, 80%, and 100%.')
 param enableBudgetAlert bool = true
 
-@description('Monthly sandbox budget ceiling (USD).')
+@description('Monthly sandbox budget ceiling in USD.')
 @minValue(5)
 param monthlyBudgetAmount int = 25
 
@@ -57,121 +59,142 @@ param budgetStartDate string = '2026-11-01'
 @description('Budget end date (YYYY-MM-DD).')
 param budgetEndDate string = '2027-11-01'
 
-@description('Email addresses for cost threshold alerts.')
+@description('Email addresses for cost alerts (e.g., administrator notification email).')
 param budgetContactEmails string[] = []
 
 var commonTags = {
   application: 'NexaMindAI'
   environment: environmentName
   managedBy: 'Bicep'
-  architecture: 'OptionA-ModularMonolith'
+  architecture: 'SingleVM-DockerCompose-AzureSQLFree'
 }
 
 var identityName = 'id-nexamind-${environmentName}'
-var logAnalyticsName = 'log-nexamind-${environmentName}-${uniqueSuffix}'
-var acrName = toLower('acrnexamind${environmentName}${uniqueSuffix}')
-var storageAccountName = toLower('stnexamind${environmentName}${uniqueSuffix}')
+var nsgName = 'nsg-nexamind-${environmentName}'
+var vnetName = 'vnet-nexamind-${environmentName}'
+var publicIpName = 'pip-nexamind-${environmentName}'
+var dnsLabelPrefix = toLower('nexamind-${environmentName}-${uniqueSuffix}')
+var vmName = 'vm-nexamind-${environmentName}'
+var nicName = 'nic-nexamind-${environmentName}'
 var sqlServerName = toLower('sql-nexamind-${environmentName}-${uniqueSuffix}')
-var containerAppsEnvName = 'cae-nexamind-${environmentName}'
+var storageAccountName = toLower('stnexamind${environmentName}${uniqueSuffix}')
+var logAnalyticsName = toLower('log-nexamind-${environmentName}-${uniqueSuffix}')
+var vmssName = 'vmss-nexamind-${environmentName}'
 
-resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: identityName
-  location: location
-  tags: commonTags
-}
-
-module logAnalytics 'modules/log-analytics.bicep' = {
-  name: 'deploy-log-analytics'
+module identity 'modules/identity.bicep' = {
+  name: 'deploy-identity'
   params: {
-    workspaceName: logAnalyticsName
+    identityName: identityName
     location: location
-    retentionInDays: 30
-    dailyQuotaGb: 1
     tags: commonTags
   }
 }
 
-module acr 'modules/acr.bicep' = {
-  name: 'deploy-acr'
+module nsg 'modules/nsg.bicep' = {
+  name: 'deploy-nsg'
   params: {
-    registryName: acrName
+    nsgName: nsgName
     location: location
-    managedIdentityPrincipalId: managedIdentity.properties.principalId
+    adminAllowedCidr: adminAllowedCidr
     tags: commonTags
   }
 }
 
-module storage 'modules/storage.bicep' = {
-  name: 'deploy-storage'
+module network 'modules/network.bicep' = {
+  name: 'deploy-network'
   params: {
-    storageAccountName: storageAccountName
+    vnetName: vnetName
+    subnetName: 'snet-nexamind-app'
+    publicIpName: publicIpName
+    dnsLabelPrefix: dnsLabelPrefix
+    nsgId: nsg.outputs.nsgId
     location: location
-    documentsContainerName: 'nexamind-documents'
-    managedIdentityPrincipalId: managedIdentity.properties.principalId
     tags: commonTags
   }
 }
 
-module sqlDatabase 'modules/sql-database.bicep' = {
-  name: 'deploy-sql-database'
+module vm 'modules/vm.bicep' = {
+  name: 'deploy-vm'
+  params: {
+    vmName: vmName
+    nicName: nicName
+    location: location
+    vmSize: vmSize
+    adminUsername: vmAdminUsername
+    sshPublicKey: vmSshPublicKey
+    subnetId: network.outputs.subnetId
+    publicIpId: network.outputs.publicIpId
+    managedIdentityId: identity.outputs.identityId
+    osDiskSizeGb: 64
+    tags: commonTags
+  }
+}
+
+module sql 'modules/sql.bicep' = if (deploySql) {
+  name: 'deploy-sql'
   params: {
     sqlServerName: sqlServerName
     databaseName: 'nexamind'
     location: location
     administratorLogin: sqlAdminLogin
     administratorLoginPassword: sqlAdminPassword
+    vmPublicIpAddress: network.outputs.publicIpAddress
+    adminBootstrapIpAddress: sqlAdminBootstrapIp
     useFreeLimit: sqlUseFreeLimit
     autoPauseDelayMinutes: 60
     tags: commonTags
   }
 }
 
-module containerApps 'modules/container-apps-env.bicep' = {
-  name: 'deploy-container-apps'
+module storage 'modules/storage.bicep' = if (deployStorage) {
+  name: 'deploy-storage'
   params: {
-    environmentName: containerAppsEnvName
-    apiAppName: 'ca-nexamind-api'
-    webAppName: 'ca-nexamind-web'
-    workerJobName: 'caj-nexamind-worker'
+    storageAccountName: storageAccountName
     location: location
-    managedIdentityId: managedIdentity.id
-    logAnalyticsWorkspaceName: logAnalytics.outputs.workspaceName
-    storageAccountName: storage.outputs.storageAccountName
-    storageContainerName: storage.outputs.containerName
-    acrLoginServer: acr.outputs.loginServer
-    backendImage: '${acr.outputs.loginServer}/nexamind-ai-backend:${backendImageTag}'
-    frontendImage: '${acr.outputs.loginServer}/nexamind-ai-frontend:${frontendImageTag}'
-    sqlServerFqdn: sqlDatabase.outputs.sqlServerFqdn
-    sqlDatabaseName: sqlDatabase.outputs.databaseName
-    sqlAdminLogin: sqlAdminLogin
-    sqlAdminPassword: sqlAdminPassword
-    appKey: appKey
-    aiDefaultProvider: aiDefaultProvider
-    openAiApiKey: openAiApiKey
-    geminiApiKey: geminiApiKey
-    workerCronExpression: '*/5 * * * *'
+    documentsContainerName: 'nexamind-documents'
+    managedIdentityPrincipalId: identity.outputs.principalId
     tags: commonTags
   }
 }
 
-module budget 'modules/budget.bicep' = if (enableBudgetAlert && !empty(budgetContactEmails)) {
-  name: 'deploy-sandbox-budget'
+module vmss 'modules/vmss.bicep' = if (deployVmss) {
+  name: 'deploy-vmss-optional'
   params: {
-    budgetName: 'budget-nexamind-${environmentName}'
-    monthlyAmount: monthlyBudgetAmount
-    startDate: budgetStartDate
-    endDate: budgetEndDate
-    contactEmails: budgetContactEmails
+    vmssName: vmssName
+    location: location
+    vmSize: 'Standard_B1ms'
+    instanceCount: 1
+    adminUsername: vmAdminUsername
+    sshPublicKey: vmSshPublicKey
+    subnetId: network.outputs.subnetId
+    nsgId: nsg.outputs.nsgId
+    managedIdentityId: identity.outputs.identityId
+    tags: commonTags
   }
 }
 
-output managedIdentityClientId string = managedIdentity.properties.clientId
-output acrLoginServer string = acr.outputs.loginServer
-output acrName string = acr.outputs.registryName
-output storageAccountName string = storage.outputs.storageAccountName
-output sqlServerFqdn string = sqlDatabase.outputs.sqlServerFqdn
-output apiAppName string = containerApps.outputs.apiAppName
-output apiUrl string = containerApps.outputs.apiUrl
-output webAppName string = containerApps.outputs.webAppName
-output webUrl string = containerApps.outputs.webUrl
-output workerJobName string = containerApps.outputs.workerJobName
+module monitoring 'modules/monitoring.bicep' = {
+  name: 'deploy-monitoring'
+  params: {
+    workspaceName: logAnalyticsName
+    location: location
+    retentionInDays: 30
+    dailyQuotaGb: 1
+    enableBudgetAlert: enableBudgetAlert
+    budgetName: 'budget-nexamind-${environmentName}'
+    monthlyBudgetAmount: monthlyBudgetAmount
+    budgetStartDate: budgetStartDate
+    budgetEndDate: budgetEndDate
+    contactEmails: budgetContactEmails
+    tags: commonTags
+  }
+}
+
+output vmName string = vm.outputs.vmName
+output vmPublicIp string = network.outputs.publicIpAddress
+output vmFqdn string = network.outputs.fqdn
+output vmManagedIdentityClientId string = identity.outputs.clientId
+output sqlServerFqdn string = deploySql ? sql.outputs.sqlServerFqdn : ''
+output sqlDatabaseName string = deploySql ? sql.outputs.databaseName : ''
+output storageAccountName string = deployStorage ? storage.outputs.storageAccountName : ''
+output logAnalyticsWorkspaceName string = monitoring.outputs.workspaceName

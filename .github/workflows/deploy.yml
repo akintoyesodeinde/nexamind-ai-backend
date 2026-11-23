@@ -1,29 +1,20 @@
-name: Deploy Backend to Azure Container Apps (OIDC)
+name: Deploy Backend to Azure VM (Docker Hub + Entra OIDC)
 
 on:
   workflow_dispatch:
     inputs:
       environment:
-        description: Target GitHub Environment
+        description: Protected GitHub Deployment Environment
         required: true
         default: azure-dev
         type: choice
         options:
           - azure-dev
-      run_what_if_only:
-        description: Preview Bicep changes via what-if without deploying
+      run_migrations:
+        description: Run php artisan migrate --force during deployment
         required: true
-        default: false
+        default: true
         type: boolean
-      ai_default_provider:
-        description: Default AI provider in sandbox
-        required: true
-        default: mock
-        type: choice
-        options:
-          - mock
-          - openai
-          - gemini
   push:
     tags:
       - "v*.*.*"
@@ -33,12 +24,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: backend-deploy-${{ inputs.environment || 'azure-dev' }}
+  group: nexamind-backend-deploy-${{ inputs.environment || 'azure-dev' }}
   cancel-in-progress: false
 
 jobs:
-  build-scan-and-deploy:
-    name: Build, Scan, Bicep What-If & Deploy API/Worker
+  build-scan-push-and-deploy:
+    name: Build, Scan, Push to Docker Hub & Deploy via Entra OIDC VM Run Command
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment || 'azure-dev' }}
     timeout-minutes: 30
@@ -53,100 +44,145 @@ jobs:
           SHORT_SHA="${GITHUB_SHA::7}"
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "rev_suffix=rev-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "release_tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate required non-secret deployment variables
+        run: |
+          for v in DOCKERHUB_USERNAME AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP AZURE_VM_NAME; do
+            if [ -z "${!v}" ]; then
+              echo "::error::Missing required GitHub Environment Variable: ${v}"
+              exit 1
+            fi
+          done
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          AZURE_VM_NAME: ${{ vars.AZURE_VM_NAME }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build production backend image
+      - name: Build production backend image locally for vulnerability scanning
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           target: production
           load: true
-          tags: nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}
+          tags: ${{ vars.DOCKERHUB_USERNAME }}/nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}
 
       - name: Scan production image with Trivy (fail on fixable CRITICAL)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}
+          image-ref: ${{ vars.DOCKERHUB_USERNAME }}/nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}
           format: table
           exit-code: "1"
           ignore-unfixed: true
           vuln-type: os,library
           severity: CRITICAL
 
-      - name: Authenticate to Azure via Microsoft Entra OIDC (Zero Secrets)
+      - name: Authenticate to Docker Hub (Scoped Access Token — Never Account Password)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push immutable versioned image to Docker Hub
+        run: |
+          IMAGE="${{ vars.DOCKERHUB_USERNAME }}/nexamind-ai-backend"
+          TAG="${{ steps.meta.outputs.image_tag }}"
+          docker push "${IMAGE}:${TAG}"
+          if [ -n "${{ steps.meta.outputs.release_tag }}" ]; then
+            docker tag "${IMAGE}:${TAG}" "${IMAGE}:${{ steps.meta.outputs.release_tag }}"
+            docker push "${IMAGE}:${{ steps.meta.outputs.release_tag }}"
+          fi
+
+      - name: Authenticate to Azure via Microsoft Entra OIDC (Zero Client Secrets)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Preview Azure Bicep Infrastructure (what-if)
+      - name: Deploy Backend to Azure VM via Secure VM Run Command (No Inbound SSH Needed)
         env:
-          NEXAMIND_SQL_ADMIN_PASSWORD: ${{ secrets.NEXAMIND_SQL_ADMIN_PASSWORD }}
-          NEXAMIND_APP_KEY: ${{ secrets.NEXAMIND_APP_KEY }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+          RUN_MIGRATIONS: ${{ inputs.run_migrations != false && 'true' || 'false' }}
         run: |
-          az deployment group what-if \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --template-file infrastructure/azure/main.bicep \
-            --parameters infrastructure/azure/parameters.dev.bicepparam \
-            --parameters backendImageTag="${{ steps.meta.outputs.image_tag }}" \
-            --parameters aiDefaultProvider="${{ inputs.ai_default_provider || 'mock' }}"
+          COMPOSE_B64=$(base64 -w0 docker/compose.prod.yaml)
+          PROXY_B64=$(base64 -w0 docker/nginx/vm-proxy.conf)
 
-      - name: Push immutable image to Azure Container Registry
-        if: ${{ !inputs.run_what_if_only }}
-        run: |
-          ACR_NAME="${{ vars.AZURE_ACR_NAME }}"
-          ACR_SERVER="${ACR_NAME}.azurecr.io"
-          az acr login --name "${ACR_NAME}"
-          docker tag "nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}" "${ACR_SERVER}/nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}"
-          docker push "${ACR_SERVER}/nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}"
+          cat <<'SCRIPT' > /tmp/deploy-backend.sh
+          #!/usr/bin/env bash
+          set -euo pipefail
+          DOCKERHUB_USER="$1"
+          NEW_TAG="$2"
+          RUN_MIGRATIONS="$3"
+          COMPOSE_B64="$4"
+          PROXY_B64="$5"
 
-      - name: Deploy Azure Infrastructure & Update Container App Revision
-        if: ${{ !inputs.run_what_if_only }}
-        env:
-          NEXAMIND_SQL_ADMIN_PASSWORD: ${{ secrets.NEXAMIND_SQL_ADMIN_PASSWORD }}
-          NEXAMIND_APP_KEY: ${{ secrets.NEXAMIND_APP_KEY }}
-        run: |
-          az deployment group create \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --name "nexamind-backend-${{ steps.meta.outputs.short_sha }}" \
-            --template-file infrastructure/azure/main.bicep \
-            --parameters infrastructure/azure/parameters.dev.bicepparam \
-            --parameters backendImageTag="${{ steps.meta.outputs.image_tag }}" \
-            --parameters aiDefaultProvider="${{ inputs.ai_default_provider || 'mock' }}"
+          mkdir -p /opt/nexamind/nginx /opt/nexamind/releases
+          echo "${COMPOSE_B64}" | base64 -d > /opt/nexamind/compose.prod.yaml
+          echo "${PROXY_B64}" | base64 -d > /opt/nexamind/nginx/vm-proxy.conf
 
-          ACR_SERVER="${{ vars.AZURE_ACR_NAME }}.azurecr.io"
-          az containerapp update \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --name ca-nexamind-api \
-            --image "${ACR_SERVER}/nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}" \
-            --revision-suffix "${{ steps.meta.outputs.rev_suffix }}"
+          touch /opt/nexamind/.env.deploy
+          chmod 640 /opt/nexamind/.env.deploy
 
-          az containerapp job update \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --name caj-nexamind-worker \
-            --image "${ACR_SERVER}/nexamind-ai-backend:${{ steps.meta.outputs.image_tag }}"
+          PREV_TAG=$(grep '^BACKEND_IMAGE_TAG=' /opt/nexamind/.env.deploy | cut -d= -f2 || true)
+          if [ -n "${PREV_TAG}" ] && [ "${PREV_TAG}" != "${NEW_TAG}" ]; then
+            echo "${PREV_TAG}" > /opt/nexamind/releases/backend.previous
+          fi
 
-      - name: Post-Deploy Health & Readiness Smoke Test
-        if: ${{ !inputs.run_what_if_only }}
-        run: |
-          API_FQDN=$(az containerapp show \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --name ca-nexamind-api \
-            --query "properties.configuration.ingress.fqdn" -o tsv)
+          grep -q '^DOCKERHUB_USERNAME=' /opt/nexamind/.env.deploy \
+            && sed -i "s|^DOCKERHUB_USERNAME=.*|DOCKERHUB_USERNAME=${DOCKERHUB_USER}|" /opt/nexamind/.env.deploy \
+            || echo "DOCKERHUB_USERNAME=${DOCKERHUB_USER}" >> /opt/nexamind/.env.deploy
 
-          echo "Verifying https://${API_FQDN}/api/v1/health/live and /ready..."
+          grep -q '^BACKEND_IMAGE_TAG=' /opt/nexamind/.env.deploy \
+            && sed -i "s|^BACKEND_IMAGE_TAG=.*|BACKEND_IMAGE_TAG=${NEW_TAG}|" /opt/nexamind/.env.deploy \
+            || echo "BACKEND_IMAGE_TAG=${NEW_TAG}" >> /opt/nexamind/.env.deploy
+
+          grep -q '^FRONTEND_IMAGE_TAG=' /opt/nexamind/.env.deploy \
+            || echo "FRONTEND_IMAGE_TAG=${NEW_TAG}" >> /opt/nexamind/.env.deploy
+
+          if [ ! -f /opt/nexamind/secrets/backend.env ]; then
+            echo "ERROR: /opt/nexamind/secrets/backend.env is missing on VM. Provision runtime secrets first."
+            exit 1
+          fi
+
+          docker compose --env-file /opt/nexamind/.env.deploy -f /opt/nexamind/compose.prod.yaml pull backend
+          docker compose --env-file /opt/nexamind/.env.deploy -f /opt/nexamind/compose.prod.yaml up -d --no-deps backend
+
+          if [ "${RUN_MIGRATIONS}" = "true" ]; then
+            docker exec nexamind-backend php artisan migrate --force
+          fi
+
           for i in $(seq 1 12); do
-            if curl -fsS "https://${API_FQDN}/api/v1/health/ready"; then
+            if docker exec nexamind-backend curl -fsS http://127.0.0.1:8080/api/v1/health/ready; then
               echo ""
-              echo "Backend readiness probe succeeded!"
+              echo "${NEW_TAG}" > /opt/nexamind/releases/backend.current
+              echo "BACKEND_DEPLOY_VERIFIED=${NEW_TAG}"
               exit 0
             fi
-            sleep 10
+            sleep 5
           done
-          echo "::error::Backend readiness probe failed after deployment."
+          echo "ERROR: Backend readiness check failed after deployment."
           exit 1
+          SCRIPT
+
+          az vm run-command invoke \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --name "${{ vars.AZURE_VM_NAME }}" \
+            --command-id RunShellScript \
+            --scripts @/tmp/deploy-backend.sh \
+            --parameters "${DOCKERHUB_USERNAME}" "${IMAGE_TAG}" "${RUN_MIGRATIONS}" "${COMPOSE_B64}" "${PROXY_B64}" \
+            --query "value[0].message" -o tsv | tee /tmp/vm-deploy.log
+
+          grep -q "BACKEND_DEPLOY_VERIFIED=${IMAGE_TAG}" /tmp/vm-deploy.log

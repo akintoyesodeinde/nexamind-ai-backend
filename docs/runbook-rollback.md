@@ -1,56 +1,46 @@
-# NexaMind AI — Deployment & Rollback Operational Runbook
+# NexaMind AI — Deployment, Rollback & Disaster Recovery Runbook
 
-Both `ca-nexamind-api` and `ca-nexamind-web` run in Azure Container Apps with `activeRevisionsMode: 'Multiple'` and immutable `sha-<short>` container image tags, enabling near-instant traffic rollback without rebuilding containers.
+Every production image pushed to Docker Hub is tagged with an immutable Git commit tag (`sha-<short>`) and optional SemVer release tag (`vX.Y.Z`), and every successful deployment records its verified tag in `/opt/nexamind/releases/` on the Azure VM.
 
 ---
 
-## 1. Automated One-Click Rollback (GitHub Actions — Recommended)
+## 1. Automated Rollback via GitHub Actions (Microsoft Entra OIDC + VM Run Command)
 
-### Backend API (`ca-nexamind-api`)
-1. Open **Actions -> Rollback Backend Container App Revision (OIDC)** (`rollback.yml`) in `akintoyesodeinde/nexamind-ai-backend`.
+### Backend Rollback (`nexamind-ai-backend`)
+1. Open **Actions -> Rollback Backend on Azure VM (Docker Hub + Entra OIDC)** (`rollback.yml`).
 2. Click **Run workflow**:
    - `environment`: `azure-dev`
-   - `target_revision`: leave blank to automatically select the previous healthy revision (or paste an exact revision name from `az containerapp revision list`).
+   - `target_image_tag`: exact prior verified Docker Hub tag (e.g., `sha-dfe517d`), or leave blank to automatically roll back to `/opt/nexamind/releases/backend.previous`.
 3. Approve the protected `azure-dev` environment gate.
-4. The workflow authenticates via Microsoft Entra OIDC, activates the target revision, shifts **100% ingress traffic**, and verifies `GET https://<api-fqdn>/api/v1/health/ready` returns HTTP `200`.
+4. GitHub authenticates to Azure via Entra OIDC, executes `az vm run-command invoke` to update `BACKEND_IMAGE_TAG` in `/opt/nexamind/.env.deploy`, pulls and restarts `nexamind-backend` + `nexamind-proxy`, and verifies `https://127.0.0.1/api/v1/health/ready` returns HTTP `200`.
 
-### Frontend SPA (`ca-nexamind-web`)
-1. Open **Actions -> Rollback Frontend Container App Revision (OIDC)** (`rollback.yml`) in `akintoyesodeinde/nexamind-ai-frontend`.
-2. Click **Run workflow** -> approve `azure-dev` -> workflow shifts 100% traffic and verifies `GET https://<web-fqdn>/healthz` returns HTTP `200`.
+### Frontend Rollback (`nexamind-ai-frontend`)
+1. Open **Actions -> Rollback Frontend on Azure VM (Docker Hub + Entra OIDC)** (`rollback.yml`).
+2. Click **Run workflow** (leave `target_image_tag` blank to roll back to `/opt/nexamind/releases/frontend.previous`), approve `azure-dev`, and wait for automated `/healthz` + SPA verification.
 
 ---
 
-## 2. Manual Azure CLI Rollback Drill (Emergency Fallback)
+## 2. Manual SSH Emergency Rollback (From Local Windows PowerShell)
 
+```powershell
+$PublicIP = az vm show --resource-group rg-nexamind-dev --name vm-nexamind-dev --show-details --query publicIps -o tsv
+ssh -i "$HOME\.ssh\nexamind_azure" "nexamindops@$PublicIP"
+```
+
+On the Ubuntu VM:
 ```bash
-RG="rg-nexamind-dev"
-APP="ca-nexamind-api"
-
-# 1. List revisions with health state & traffic weight
-az containerapp revision list \
-  --resource-group "$RG" \
-  --name "$APP" \
-  --all \
-  --output table
-
-# 2. Shift 100% traffic to the previous healthy revision
-PREV_REV="<paste-previous-healthy-revision-name>"
-az containerapp revision activate --resource-group "$RG" --name "$APP" --revision "$PREV_REV"
-az containerapp ingress traffic set --resource-group "$RG" --name "$APP" --revision-weight "${PREV_REV}=100"
-
-# 3. Verify readiness
-API_FQDN=$(az containerapp show --resource-group "$RG" --name "$APP" --query "properties.configuration.ingress.fqdn" -o tsv)
-curl -fsS "https://${API_FQDN}/api/v1/health/ready"
+cd /opt/nexamind
+cat releases/backend.previous
+# Update BACKEND_IMAGE_TAG (or FRONTEND_IMAGE_TAG) in /opt/nexamind/.env.deploy
+sudo sed -i 's/^BACKEND_IMAGE_TAG=.*/BACKEND_IMAGE_TAG=<PREVIOUS_TAG>/' /opt/nexamind/.env.deploy
+sudo docker compose --env-file /opt/nexamind/.env.deploy -f /opt/nexamind/compose.prod.yaml pull backend
+sudo docker compose --env-file /opt/nexamind/.env.deploy -f /opt/nexamind/compose.prod.yaml up -d --no-deps backend
+sudo /usr/local/bin/nexamind-healthcheck.sh
 ```
 
 ---
 
-## 3. Database Migration Safety Policy
-- Follow **expand-and-contract** schema migrations: never drop or rename a column in the same release that removes application reads of that column, so rolling back a container revision never crashes against a mutated schema.
-- Before applying schema changes in production/staging, verify the migration against a disposable SQL Server 2025 database (automatically enforced on every commit in `ci.yml`).
-
-## 4. Incident Triage & Audit Integrity Verification
-1. Inspect live logs in Azure Log Analytics (`ContainerAppConsoleLogs_CL`).
-2. Check **Screen 17 (Security Audit Dashboard)** or call `GET /api/v1/audit-logs/verify-chain` to verify SHA-256 hash-chain integrity across tenant audit records.
-3. Review high/critical alerts in `GET /api/v1/security-events?severity=critical`.
-4. To rotate `APP_KEY`, SQL credentials, or AI provider API keys, update the `azure-dev` GitHub Environment secret and re-run `deploy.yml` (creates a fresh revision with updated Container Apps secret references).
+## 3. Database Migration & Backup Recovery Policy
+- **Expand-and-Contract Migrations:** Never drop/rename columns in the same release that changes application reads, guaranteeing container rollbacks stay schema-compatible.
+- **Azure SQL Free Offer Automated Backups:** Includes 32 GB automated point-in-time restore (PITR) backup storage; restore to a new database via Azure CLI `az sql db restore` if logical corruption ever occurs.
+- **VM Disaster Recovery:** Because the VM is stateless (code comes from Docker Hub, database lives on Azure SQL, documents live in Azure Blob Storage), re-running `04-deploy-azure-vm.ps1` + `deploy.yml` rebuilds a clean server from scratch in minutes.
