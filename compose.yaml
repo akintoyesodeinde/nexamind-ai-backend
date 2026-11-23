@@ -1,0 +1,78 @@
+name: nexamind-ai-backend
+
+services:
+  sqlserver:
+    image: ${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2025-latest}
+    profiles: ["minimal", "full"]
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: ${MSSQL_PID:-Developer}
+      MSSQL_SA_PASSWORD: ${DB_PASSWORD:-NexaMind_Dev_Pass2026!}
+      MSSQL_MEMORY_LIMIT_MB: ${MSSQL_MEMORY_LIMIT_MB:-2048}
+    ports:
+      - "${MSSQL_HOST_PORT:-14333}:1433"
+    volumes:
+      - nexamind_mssql_data:/var/opt/mssql
+      - ./docker/sqlserver/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -C -Q 'SELECT 1' -b || exit 1"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 25s
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    profiles: ["minimal", "full", "cloud-db"]
+    restart: unless-stopped
+    command: "azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --loose --skipApiVersionCheck"
+    ports:
+      - "${AZURITE_HOST_PORT:-10000}:10000"
+    volumes:
+      - nexamind_azurite_data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(10000,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    profiles: ["minimal", "full", "cloud-db"]
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8080"
+    volumes:
+      - .:/var/www/html
+      - nexamind_backend_vendor:/var/www/html/vendor
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    profiles: ["full"]
+    restart: unless-stopped
+    command: ["php", "artisan", "queue:work", "database", "--sleep=3", "--tries=3", "--max-time=3600"]
+    volumes:
+      - .:/var/www/html
+      - nexamind_backend_vendor:/var/www/html/vendor
+
+volumes:
+  nexamind_mssql_data:
+  nexamind_azurite_data:
+  nexamind_backend_vendor:

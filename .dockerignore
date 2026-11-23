@@ -1,0 +1,14 @@
+.git
+.github
+node_modules
+vendor
+tests
+storage/logs/*
+.env
+.env.*
+!.env.example
+docker-compose*.yml
+compose*.yaml
+README.md
+docs
+infrastructure

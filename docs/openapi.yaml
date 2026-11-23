@@ -1,0 +1,215 @@
+openapi: 3.1.0
+info:
+  title: NexaMind AI REST API
+  version: 1.0.0-phase1
+  description: >
+    Enterprise Generative AI Knowledge & Workflow Automation Platform API.
+    All tenant-scoped endpoints require an authenticated Sanctum session or bearer token
+    and a valid `X-Tenant-ID` UUID header corresponding to an active organization membership.
+servers:
+  - url: http://127.0.0.1:8000/api/v1
+    description: Local Docker development server
+tags:
+  - name: Health
+  - name: Auth
+  - name: Tenancy
+  - name: Audit
+components:
+  securitySchemes:
+    sanctumCookie:
+      type: apiKey
+      in: cookie
+      name: nexamind_session
+    sanctumBearer:
+      type: http
+      scheme: bearer
+  parameters:
+    TenantHeader:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Active organization UUID.
+  schemas:
+    Meta:
+      type: object
+      required: [request_id, timestamp]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        timestamp:
+          type: string
+          format: date-time
+    ErrorResponse:
+      type: object
+      required: [error, meta]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: string
+        meta:
+          $ref: '#/components/schemas/Meta'
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Application process is alive
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Readiness probe (verifies SQL Server connectivity)
+      responses:
+        '200':
+          description: Application and SQL Server database are ready
+        '503':
+          description: Dependency unavailable
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user account
+      responses:
+        '201':
+          description: Registered and authenticated
+        '422':
+          description: Validation error
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate user
+      responses:
+        '200':
+          description: Authenticated
+        '401':
+          description: Invalid credentials
+  /auth/logout:
+    post:
+      tags: [Auth]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      summary: Revoke active session or bearer token
+      responses:
+        '200':
+          description: Signed out
+  /me:
+    get:
+      tags: [Auth]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      summary: Return current user profile, memberships, and role permissions
+      responses:
+        '200':
+          description: Current user payload
+  /me/profile:
+    patch:
+      tags: [Auth]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      summary: Update current user profile and preferences
+      responses:
+        '200':
+          description: Updated user
+  /tenants:
+    post:
+      tags: [Tenancy]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      summary: Create a new organization and assign caller as Owner
+      responses:
+        '201':
+          description: Tenant created
+  /tenants/current:
+    get:
+      tags: [Tenancy]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Retrieve current tenant details, settings, permissions, and summary stats
+      responses:
+        '200':
+          description: Tenant payload
+        '403':
+          description: User is not a member of the requested tenant
+  /tenants/current/settings:
+    patch:
+      tags: [Tenancy]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Update tenant AI budgets, upload limits, and approval policies (Owner/Admin)
+      responses:
+        '200':
+          description: Updated tenant settings
+  /tenants/current/members:
+    get:
+      tags: [Tenancy]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: List members of the current tenant
+      responses:
+        '200':
+          description: Member list
+    post:
+      tags: [Tenancy]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Invite or add a member with an RBAC role (Owner/Admin)
+      responses:
+        '201':
+          description: Member added
+  /tenants/current/members/{membershipId}:
+    patch:
+      tags: [Tenancy]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - name: membershipId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      summary: Update a member's role or membership status (Owner/Admin)
+      responses:
+        '200':
+          description: Member updated
+    delete:
+      tags: [Tenancy]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - name: membershipId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      summary: Remove a member from the tenant (cannot remove last Owner)
+      responses:
+        '204':
+          description: Member removed
+  /roles:
+    get:
+      tags: [Tenancy]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      summary: List platform RBAC roles and permission definitions
+      responses:
+        '200':
+          description: Roles list
+  /audit-logs:
+    get:
+      tags: [Audit]
+      security: [{ sanctumCookie: [] }, { sanctumBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantHeader' }]
+      summary: Search tenant-scoped tamper-evident audit logs (Owner/Admin/Manager)
+      responses:
+        '200':
+          description: Paginated audit log entries
+        '403':
+          description: Forbidden for Member/Viewer or cross-tenant access
