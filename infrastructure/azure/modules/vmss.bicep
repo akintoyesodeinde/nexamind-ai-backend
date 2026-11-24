@@ -36,7 +36,7 @@ param managedIdentityId string
 @description('Resource tags.')
 param tags object = {}
 
-var cloudInitScript = loadTextContent('../cloud-init/nexamind-init.yaml')
+var cloudInitScript = replace(loadTextContent('../cloud-init/nexamind-init.yaml'), '\r\n', '\n')
 
 resource vmss 'Microsoft.Compute/virtualMachineScaleSets@2024-07-01' = {
   name: vmssName

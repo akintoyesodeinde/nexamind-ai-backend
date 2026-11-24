@@ -98,73 +98,79 @@ write_files:
       [Install]
       WantedBy=timers.target
 
+  - path: /usr/local/sbin/nexamind-bootstrap.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      STATUS_FILE="/var/log/nexamind-bootstrap.status"
+      trap 'echo "FAILED at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATUS_FILE"' ERR
+
+      echo "STARTED at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATUS_FILE"
+
+      # 1. Configure 2 GiB swapfile so 1 GiB free-tier VMs (B1s / B2ats_v2) remain resilient under load
+      if [ ! -f /swapfile ]; then
+        fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        sysctl -w vm.swappiness=20
+        echo 'vm.swappiness=20' > /etc/sysctl.d/99-nexamind-swap.conf
+      fi
+
+      # 2. Install official Docker Engine + Docker Compose v2 plugin
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+      chmod a+r /etc/apt/keyrings/docker.gpg
+      ARCH="$(dpkg --print-architecture)"
+      CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+      echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update -qq
+      apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      systemctl enable docker
+      systemctl start docker
+
+      # 3. Create secure application deployment directory layout
+      mkdir -p /opt/nexamind/nginx /opt/nexamind/certs /opt/nexamind/secrets /opt/nexamind/releases /opt/nexamind/logs /var/www/certbot
+      chmod 750 /opt/nexamind
+      chmod 700 /opt/nexamind/secrets /opt/nexamind/certs
+      chmod 755 /opt/nexamind/nginx /opt/nexamind/releases /opt/nexamind/logs
+
+      # Grant admin user docker group membership if present
+      ADMIN_USER=$(awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}' /etc/passwd)
+      if [ -n "${ADMIN_USER}" ]; then
+        usermod -aG docker "${ADMIN_USER}" || true
+        chown -R "${ADMIN_USER}:docker" /opt/nexamind/nginx /opt/nexamind/releases /opt/nexamind/logs
+      fi
+
+      # 4. Generate self-signed bootstrap TLS certificate (replace with Let's Encrypt Certbot once DNS domain is pointed)
+      if [ ! -f /opt/nexamind/certs/fullchain.pem ]; then
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout /opt/nexamind/certs/privkey.pem \
+          -out /opt/nexamind/certs/fullchain.pem \
+          -subj "/CN=nexamind.local/O=NexaMind AI Sandbox"
+        chmod 600 /opt/nexamind/certs/privkey.pem
+        chmod 644 /opt/nexamind/certs/fullchain.pem
+      fi
+
+      # 5. Harden host firewall (UFW): allow ONLY SSH (restricted by Azure NSG), HTTP, and HTTPS; NEVER 1433
+      ufw default deny incoming
+      ufw default allow outgoing
+      ufw allow 22/tcp comment 'SSH (restricted by Azure NSG)'
+      ufw allow 80/tcp comment 'HTTP redirect and ACME challenge'
+      ufw allow 443/tcp comment 'HTTPS reverse proxy'
+      ufw --force enable
+
+      # 6. Enable fail2ban and systemd auto-restart units
+      systemctl enable fail2ban || true
+      systemctl start fail2ban || true
+      systemctl daemon-reload
+      systemctl enable nexamind.service
+      systemctl enable --now nexamind-worker.timer
+
+      echo "SUCCESS at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATUS_FILE"
+
 runcmd:
-  - |
-    set -euo pipefail
-    STATUS_FILE="/var/log/nexamind-bootstrap.status"
-    trap 'echo "FAILED at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATUS_FILE"' ERR
-
-    echo "STARTED at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATUS_FILE"
-
-    # 1. Configure 2 GiB swapfile so 1 GiB free-tier VMs (B1s / B2ats_v2) remain resilient under load
-    if [ ! -f /swapfile ]; then
-      fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
-      chmod 600 /swapfile
-      mkswap /swapfile
-      swapon /swapfile
-      grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-      sysctl -w vm.swappiness=20
-      echo 'vm.swappiness=20' > /etc/sysctl.d/99-nexamind-swap.conf
-    fi
-
-    # 2. Install official Docker Engine + Docker Compose v2 plugin
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
-    chmod a+r /etc/apt/keyrings/docker.gpg
-    ARCH="$(dpkg --print-architecture)"
-    CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
-    echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${CODENAME} stable" > /etc/apt/sources.list.d/docker.list
-    apt-get update -qq
-    apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    systemctl enable docker
-    systemctl start docker
-
-    # 3. Create secure application deployment directory layout
-    mkdir -p /opt/nexamind/nginx /opt/nexamind/certs /opt/nexamind/secrets /opt/nexamind/releases /opt/nexamind/logs /var/www/certbot
-    chmod 750 /opt/nexamind
-    chmod 700 /opt/nexamind/secrets /opt/nexamind/certs
-    chmod 755 /opt/nexamind/nginx /opt/nexamind/releases /opt/nexamind/logs
-
-    # Grant admin user docker group membership if present
-    ADMIN_USER=$(awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}' /etc/passwd)
-    if [ -n "${ADMIN_USER}" ]; then
-      usermod -aG docker "${ADMIN_USER}" || true
-      chown -R "${ADMIN_USER}:docker" /opt/nexamind/nginx /opt/nexamind/releases /opt/nexamind/logs
-    fi
-
-    # 4. Generate self-signed bootstrap TLS certificate (replace with Let's Encrypt Certbot once DNS domain is pointed)
-    if [ ! -f /opt/nexamind/certs/fullchain.pem ]; then
-      openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-        -keyout /opt/nexamind/certs/privkey.pem \
-        -out /opt/nexamind/certs/fullchain.pem \
-        -subj "/CN=nexamind.local/O=NexaMind AI Sandbox"
-      chmod 600 /opt/nexamind/certs/privkey.pem
-      chmod 644 /opt/nexamind/certs/fullchain.pem
-    fi
-
-    # 5. Harden host firewall (UFW): allow ONLY SSH (restricted by Azure NSG), HTTP, and HTTPS; NEVER 1433
-    ufw default deny incoming
-    ufw default allow outgoing
-    ufw allow 22/tcp comment 'SSH (restricted by Azure NSG)'
-    ufw allow 80/tcp comment 'HTTP redirect and ACME challenge'
-    ufw allow 443/tcp comment 'HTTPS reverse proxy'
-    ufw --force enable
-
-    # 6. Enable fail2ban and systemd auto-restart units
-    systemctl enable fail2ban || true
-    systemctl start fail2ban || true
-    systemctl daemon-reload
-    systemctl enable nexamind.service
-    systemctl enable --now nexamind-worker.timer
-
-    echo "SUCCESS at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATUS_FILE"
+  - [ /usr/local/sbin/nexamind-bootstrap.sh ]

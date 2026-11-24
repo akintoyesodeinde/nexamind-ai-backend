@@ -35,7 +35,7 @@ param osDiskSizeGb int = 64
 @description('Resource tags.')
 param tags object = {}
 
-var cloudInitScript = loadTextContent('../cloud-init/nexamind-init.yaml')
+var cloudInitScript = replace(loadTextContent('../cloud-init/nexamind-init.yaml'), '\r\n', '\n')
 
 resource nic 'Microsoft.Network/networkInterfaces@2023-11-01' = {
   name: nicName
