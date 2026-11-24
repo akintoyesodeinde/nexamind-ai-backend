@@ -49,15 +49,32 @@ try {
     az bicep build --file (Join-Path $azureDir "main.bicep") --stdout | Out-Null
     Write-Host "[OK] All Bicep templates compiled with 0 errors." -ForegroundColor Green
 
-    Write-Host "`n=== 3. Ensuring Resource Group '$ResourceGroup' Exists ($0) ===" -ForegroundColor Cyan
-    az group create --name $ResourceGroup --location $Location --output none
+    Write-Host "`n=== 3. Checking Required Azure Resource Providers (Free Metadata Operation) ===" -ForegroundColor Cyan
+    foreach ($ns in @("Microsoft.Compute", "Microsoft.Sql", "Microsoft.Storage", "Microsoft.Network", "Microsoft.OperationalInsights", "Microsoft.Consumption")) {
+        $state = (az provider show --namespace $ns --query registrationState -o tsv 2>$null).Trim()
+        if ($state -ne "Registered") {
+            Write-Host "Registering $ns (currently: $state)..." -ForegroundColor Yellow
+            az provider register --namespace $ns --wait --output none
+            if ($LASTEXITCODE -ne 0) { throw "Failed to register Azure provider $ns." }
+        }
+    }
+    Write-Host "[OK] All required Azure resource providers are Registered." -ForegroundColor Green
 
-    Write-Host "`n=== 4. Running Azure Deployment WHAT-IF (Preview Only — Zero Resources Created) ===" -ForegroundColor Cyan
+    Write-Host "`n=== 4. Ensuring Resource Group '$ResourceGroup' Exists in '$Location' ($0) ===" -ForegroundColor Cyan
+    $existingLoc = (az group show --name $ResourceGroup --query location -o tsv 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $existingLoc -and ($existingLoc.Trim().ToLower() -ne $Location.ToLower())) {
+        throw "Resource Group '$ResourceGroup' already exists in '$($existingLoc.Trim())', not '$Location'. Delete the old Resource Group first (purge any Log Analytics workspace if reusing the same name), or specify a new -ResourceGroup name."
+    }
+    az group create --name $ResourceGroup --location $Location --output none
+    if ($LASTEXITCODE -ne 0) { throw "Failed to create or verify Resource Group '$ResourceGroup'." }
+
+    Write-Host "`n=== 5. Running Azure Deployment WHAT-IF (Preview Only — Zero Resources Created) ===" -ForegroundColor Cyan
     az deployment group what-if `
         --resource-group $ResourceGroup `
         --template-file (Join-Path $azureDir "main.bicep") `
         --parameters (Join-Path $azureDir "parameters\dev.bicepparam") `
-        --parameters vmSize=$VmSize
+        --parameters location=$Location vmSize=$VmSize
+    if ($LASTEXITCODE -ne 0) { throw "Azure deployment what-if failed." }
 } finally {
     Remove-Item Env:NEXAMIND_SQL_ADMIN_PASSWORD -ErrorAction SilentlyContinue
     Remove-Item Env:NEXAMIND_SSH_PUBLIC_KEY -ErrorAction SilentlyContinue

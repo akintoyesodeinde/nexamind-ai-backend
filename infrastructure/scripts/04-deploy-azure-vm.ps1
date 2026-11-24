@@ -41,17 +41,34 @@ $env:NEXAMIND_SQL_ADMIN_PASSWORD = $sqlPassPlain
 $env:NEXAMIND_ALERT_EMAIL = $AlertEmail
 
 try {
+    Write-Host "`n=== Step 0: Checking Azure Resource Providers & Region ===" -ForegroundColor Cyan
+    foreach ($ns in @("Microsoft.Compute", "Microsoft.Sql", "Microsoft.Storage", "Microsoft.Network", "Microsoft.OperationalInsights", "Microsoft.Consumption")) {
+        $state = (az provider show --namespace $ns --query registrationState -o tsv 2>$null).Trim()
+        if ($state -ne "Registered") {
+            Write-Host "Registering $ns (currently: $state)..." -ForegroundColor Yellow
+            az provider register --namespace $ns --wait --output none
+            if ($LASTEXITCODE -ne 0) { throw "Failed to register Azure provider $ns." }
+        }
+    }
+
+    $existingLoc = (az group show --name $ResourceGroup --query location -o tsv 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $existingLoc -and ($existingLoc.Trim().ToLower() -ne $Location.ToLower())) {
+        throw "Resource Group '$ResourceGroup' already exists in '$($existingLoc.Trim())', not '$Location'. Delete the old Resource Group first (and purge its Log Analytics workspace if reusing '$ResourceGroup'), or pass a different -ResourceGroup."
+    }
+
     az group create --name $ResourceGroup --location $Location --output none
+    if ($LASTEXITCODE -ne 0) { throw "Failed to create Resource Group '$ResourceGroup' in '$Location'." }
 
     Write-Host "`n=== Step 1: Previewing Changes (what-if) ===" -ForegroundColor Cyan
     az deployment group what-if `
         --resource-group $ResourceGroup `
         --template-file (Join-Path $azureDir "main.bicep") `
         --parameters (Join-Path $azureDir "parameters\dev.bicepparam") `
-        --parameters vmSize=$VmSize sqlAdminBootstrapIp=$bootstrapIp
+        --parameters location=$Location vmSize=$VmSize sqlAdminBootstrapIp=$bootstrapIp
+    if ($LASTEXITCODE -ne 0) { throw "Azure what-if failed. Aborting before deployment." }
 
     Write-Host "`nREMINDER: A Standard Static Public IPv4 costs ~$3.65/mo even when the VM is stopped (covered by $200 trial credit)." -ForegroundColor Yellow
-    $confirm = Read-Host "Review the what-if output above. Type DEPLOY to provision these resources in '$ResourceGroup'"
+    $confirm = Read-Host "Review the what-if output above. Type DEPLOY to provision these resources in '$ResourceGroup' ($Location, $VmSize)"
     if ($confirm -ne "DEPLOY") {
         Write-Host "Deployment cancelled. Zero resources were created." -ForegroundColor Yellow
         exit 0
@@ -59,14 +76,26 @@ try {
 
     $deployName = "nexamind-vm-$(Get-Date -Format 'yyyyMMdd-HHmm')"
     Write-Host "`n=== Step 2: Deploying Bicep Template ($deployName) ===" -ForegroundColor Cyan
-    $result = az deployment group create `
+    $rawJson = az deployment group create `
         --resource-group $ResourceGroup `
         --name $deployName `
         --template-file (Join-Path $azureDir "main.bicep") `
         --parameters (Join-Path $azureDir "parameters\dev.bicepparam") `
-        --parameters vmSize=$VmSize sqlAdminBootstrapIp=$bootstrapIp `
+        --parameters location=$Location vmSize=$VmSize sqlAdminBootstrapIp=$bootstrapIp `
         --query properties.outputs `
-        --output json | ConvertFrom-Json
+        --output json
+
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($rawJson -join ""))) {
+        Write-Host "`n[ERROR] Deployment '$deployName' failed. Inspecting failed ARM operations:" -ForegroundColor Red
+        az deployment operation group list `
+            --resource-group $ResourceGroup `
+            --name $deployName `
+            --query "[?properties.provisioningState=='Failed'].{target:properties.targetResource.resourceName, type:properties.targetResource.resourceType, message:properties.statusMessage}" `
+            --output json
+        exit 1
+    }
+
+    $result = ($rawJson -join "`n") | ConvertFrom-Json
 
     Write-Host "`n=== DEPLOYMENT OUTPUTS ===" -ForegroundColor Green
     Write-Host "VM Name           : $($result.vmName.value)"
